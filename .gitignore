@@ -37,3 +37,8 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# Local SQLite authentication database
+/database/*.sqlite
+/database/*.sqlite-shm
+/database/*.sqlite-wal

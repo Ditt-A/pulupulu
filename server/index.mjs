@@ -1,0 +1,1197 @@
+import { createReadStream, existsSync, statSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { extname, join, normalize } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createHash, randomBytes } from 'node:crypto'
+import { createSchema, databasePath, hashPassword, openDatabase, verifyPassword } from './database.mjs'
+
+const projectRoot = fileURLToPath(new URL('../', import.meta.url))
+const distRoot = join(projectRoot, 'dist')
+const port = Number(process.env.PORT || 8787)
+const database = openDatabase()
+createSchema(database)
+
+const findUser = database.prepare(`
+  SELECT id, username, password_hash, password_salt, display_name,
+         account_type, division_role, member_id, must_change_password
+  FROM users
+  WHERE username = ? AND is_active = 1
+  LIMIT 1
+`)
+const recordLogin = database.prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?')
+const createSession = database.prepare('INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)')
+const findSession = database.prepare(`
+  SELECT u.id, u.member_id, u.username, u.display_name, u.account_type,
+         u.division_role, u.must_change_password
+  FROM sessions s
+  JOIN users u ON u.id = s.user_id
+  WHERE s.token_hash = ?
+    AND s.expires_at > CURRENT_TIMESTAMP
+    AND u.is_active = 1
+  LIMIT 1
+`)
+const deleteSession = database.prepare('DELETE FROM sessions WHERE token_hash = ?')
+const findPasswordUserById = database.prepare(`
+  SELECT id, username, password_hash, password_salt
+  FROM users
+  WHERE id = ? AND is_active = 1
+  LIMIT 1
+`)
+const updateUserPassword = database.prepare(`
+  UPDATE users
+  SET password_hash = ?, password_salt = ?, must_change_password = 0,
+      updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const deleteOtherUserSessions = database.prepare(`
+  DELETE FROM sessions
+  WHERE user_id = ? AND token_hash <> ?
+`)
+const deleteAllUserSessions = database.prepare('DELETE FROM sessions WHERE user_id = ?')
+const findRecipientByMemberId = database.prepare(`
+  SELECT id, member_id, display_name, division_role
+  FROM users
+  WHERE member_id = ? AND account_type = 'member' AND is_active = 1
+  LIMIT 1
+`)
+const findDraft = database.prepare(`
+  SELECT id, title, body, closing, status, updated_at
+  FROM private_messages
+  WHERE sender_user_id = ? AND recipient_user_id = ? AND status = 'draft'
+  LIMIT 1
+`)
+const upsertDraft = database.prepare(`
+  INSERT INTO private_messages (
+    sender_user_id, recipient_user_id, title, body, closing, status, updated_at
+  ) VALUES (?, ?, ?, ?, ?, 'draft', CURRENT_TIMESTAMP)
+  ON CONFLICT(sender_user_id, recipient_user_id) WHERE status = 'draft'
+  DO UPDATE SET
+    title = excluded.title,
+    body = excluded.body,
+    closing = excluded.closing,
+    updated_at = CURRENT_TIMESTAMP
+  RETURNING id, title, body, closing, status, updated_at
+`)
+const deleteDraft = database.prepare(`
+  DELETE FROM private_messages
+  WHERE sender_user_id = ? AND recipient_user_id = ? AND status = 'draft'
+`)
+const sendExistingDraft = database.prepare(`
+  UPDATE private_messages
+  SET title = ?, body = ?, closing = ?, status = 'sent',
+      updated_at = CURRENT_TIMESTAMP, sent_at = CURRENT_TIMESTAMP
+  WHERE sender_user_id = ? AND recipient_user_id = ? AND status = 'draft'
+  RETURNING id, status, sent_at
+`)
+const insertSentMessage = database.prepare(`
+  INSERT INTO private_messages (
+    sender_user_id, recipient_user_id, title, body, closing, status,
+    updated_at, sent_at
+  ) VALUES (?, ?, ?, ?, ?, 'sent', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  RETURNING id, status, sent_at
+`)
+const listInboxMessages = database.prepare(`
+  SELECT pm.id, pm.sent_at, pm.unlock_at,
+         sender.member_id AS sender_member_id,
+         sender.display_name AS sender_name,
+         sender.division_role AS sender_role
+  FROM private_messages pm
+  JOIN users sender ON sender.id = pm.sender_user_id
+  WHERE pm.recipient_user_id = ? AND pm.status = 'sent'
+  ORDER BY pm.sent_at DESC, pm.id DESC
+`)
+const listOpenInboxMessages = database.prepare(`
+  SELECT pm.id, pm.title, pm.body, pm.closing, pm.sent_at, pm.unlock_at,
+         pm.read_at, sender.member_id AS sender_member_id,
+         sender.display_name AS sender_name,
+         sender.division_role AS sender_role
+  FROM private_messages pm
+  JOIN users sender ON sender.id = pm.sender_user_id
+  WHERE pm.recipient_user_id = ? AND pm.status = 'sent'
+  ORDER BY pm.sent_at DESC, pm.id DESC
+`)
+const findOpenInboxMessage = database.prepare(`
+  SELECT pm.id, pm.title, pm.body, pm.closing, pm.sent_at, pm.unlock_at,
+         pm.read_at, sender.member_id AS sender_member_id,
+         sender.display_name AS sender_name,
+         sender.division_role AS sender_role
+  FROM private_messages pm
+  JOIN users sender ON sender.id = pm.sender_user_id
+  WHERE pm.id = ? AND pm.recipient_user_id = ? AND pm.status = 'sent'
+  LIMIT 1
+`)
+const markInboxMessageRead = database.prepare(`
+  UPDATE private_messages
+  SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+  WHERE id = ? AND recipient_user_id = ? AND status = 'sent'
+  RETURNING id, read_at
+`)
+const markAllInboxMessagesRead = database.prepare(`
+  UPDATE private_messages
+  SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+  WHERE recipient_user_id = ? AND status = 'sent' AND read_at IS NULL
+`)
+const adminMemberSummary = database.prepare(`
+  SELECT COUNT(*) AS total_members,
+         SUM(CASE WHEN must_change_password = 0 THEN 1 ELSE 0 END) AS secured_accounts,
+         SUM(CASE WHEN last_login_at IS NOT NULL THEN 1 ELSE 0 END) AS members_logged_in
+  FROM users
+  WHERE account_type = 'member' AND is_active = 1
+`)
+const adminActiveSessions = database.prepare(`
+  SELECT COUNT(*) AS total
+  FROM sessions s
+  JOIN users u ON u.id = s.user_id
+  WHERE s.expires_at > CURRENT_TIMESTAMP AND u.is_active = 1
+`)
+const adminMessageSummary = database.prepare(`
+  SELECT SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent_messages,
+         SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft_messages,
+         SUM(CASE WHEN status = 'sent' AND read_at IS NOT NULL THEN 1 ELSE 0 END) AS read_messages,
+         COUNT(DISTINCT CASE WHEN status = 'sent' THEN CAST(sender_user_id AS TEXT) || ':' || CAST(recipient_user_id AS TEXT) END) AS completed_pairs,
+         COUNT(DISTINCT CASE WHEN status = 'sent' THEN sender_user_id END) AS active_senders,
+         COUNT(DISTINCT CASE WHEN status = 'sent' THEN recipient_user_id END) AS reached_recipients
+  FROM private_messages
+  WHERE (? IS NULL OR COALESCE(sent_at, updated_at) >= ?)
+`)
+const adminRecentMessages = database.prepare(`
+  SELECT pm.id, pm.sent_at, pm.read_at,
+         sender.display_name AS sender_name,
+         recipient.display_name AS recipient_name
+  FROM private_messages pm
+  JOIN users sender ON sender.id = pm.sender_user_id
+  JOIN users recipient ON recipient.id = pm.recipient_user_id
+  WHERE pm.status = 'sent' AND (? IS NULL OR pm.sent_at >= ?)
+  ORDER BY pm.sent_at DESC, pm.id DESC
+  LIMIT 7
+`)
+const adminMemberMetrics = database.prepare(`
+  SELECT u.member_id, u.username, u.display_name, u.division_role,
+         u.must_change_password, u.last_login_at,
+         (SELECT COUNT(*) FROM private_messages sent
+          WHERE sent.sender_user_id = u.id AND sent.status = 'sent'
+            AND (? IS NULL OR sent.sent_at >= ?)) AS sent_count,
+         (SELECT COUNT(*) FROM private_messages received
+          WHERE received.recipient_user_id = u.id AND received.status = 'sent'
+            AND (? IS NULL OR received.sent_at >= ?)) AS received_count,
+         (SELECT COUNT(*) FROM private_messages opened
+          WHERE opened.recipient_user_id = u.id AND opened.status = 'sent'
+            AND opened.read_at IS NOT NULL AND (? IS NULL OR opened.sent_at >= ?)) AS read_count
+  FROM users u
+  WHERE u.account_type = 'member' AND u.is_active = 1
+  ORDER BY u.member_id ASC
+`)
+const adminDivisionSummary = database.prepare(`
+  SELECT division_role AS role, COUNT(*) AS total
+  FROM users
+  WHERE account_type = 'member' AND is_active = 1
+  GROUP BY division_role
+  ORDER BY total DESC, division_role ASC
+`)
+const adminDailyMessages = database.prepare(`
+  SELECT substr(sent_at, 1, 10) AS day, COUNT(*) AS total
+  FROM private_messages
+  WHERE status = 'sent' AND sent_at >= datetime('now', '-6 days')
+  GROUP BY substr(sent_at, 1, 10)
+  ORDER BY day ASC
+`)
+const findGlobalMessageAccess = database.prepare(`
+  SELECT settings.setting_value, settings.updated_at,
+         updater.display_name AS updated_by_name
+  FROM app_settings settings
+  LEFT JOIN users updater ON updater.id = settings.updated_by_user_id
+  WHERE settings.setting_key = 'global_message_access'
+  LIMIT 1
+`)
+const updateGlobalMessageAccess = database.prepare(`
+  UPDATE app_settings
+  SET setting_value = ?, updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE setting_key = 'global_message_access'
+  RETURNING setting_value, updated_at
+`)
+const globalMessageAccessImpact = database.prepare(`
+  SELECT COUNT(*) AS sent_messages,
+         SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread_messages,
+         COUNT(DISTINCT recipient_user_id) AS recipients_with_messages
+  FROM private_messages
+  WHERE status = 'sent'
+`)
+const adminCompletionMembers = database.prepare(`
+  SELECT u.member_id, u.display_name, u.division_role,
+         (SELECT COUNT(DISTINCT sent.recipient_user_id) FROM private_messages sent
+          WHERE sent.sender_user_id = u.id AND sent.status = 'sent'
+            AND (? IS NULL OR sent.sent_at >= ?)) AS completed_recipients,
+         (SELECT COUNT(DISTINCT received.sender_user_id) FROM private_messages received
+          WHERE received.recipient_user_id = u.id AND received.status = 'sent'
+            AND (? IS NULL OR received.sent_at >= ?)) AS received_from,
+         (SELECT COUNT(*) FROM private_messages drafts
+          WHERE drafts.sender_user_id = u.id AND drafts.status = 'draft'
+            AND (? IS NULL OR drafts.updated_at >= ?)) AS draft_count,
+         (SELECT COUNT(DISTINCT opened.recipient_user_id) FROM private_messages opened
+          WHERE opened.sender_user_id = u.id AND opened.status = 'sent' AND opened.read_at IS NOT NULL
+            AND (? IS NULL OR opened.sent_at >= ?)) AS opened_by_recipients
+  FROM users u
+  WHERE u.account_type = 'member' AND u.is_active = 1
+  ORDER BY u.member_id ASC
+`)
+const adminCompletedPairs = database.prepare(`
+  SELECT sender.member_id AS sender_member_id,
+         recipient.member_id AS recipient_member_id,
+         MAX(pm.sent_at) AS sent_at,
+         MAX(CASE WHEN pm.read_at IS NOT NULL THEN 1 ELSE 0 END) AS is_read
+  FROM private_messages pm
+  JOIN users sender ON sender.id = pm.sender_user_id
+  JOIN users recipient ON recipient.id = pm.recipient_user_id
+  WHERE pm.status = 'sent' AND (? IS NULL OR pm.sent_at >= ?)
+  GROUP BY sender.member_id, recipient.member_id
+  ORDER BY sender.member_id, recipient.member_id
+`)
+const adminCompletionTimeline = database.prepare(`
+  SELECT substr(sent_at, 1, 10) AS day,
+         COUNT(*) AS messages,
+         COUNT(DISTINCT CAST(sender_user_id AS TEXT) || ':' || CAST(recipient_user_id AS TEXT)) AS completed_pairs
+  FROM private_messages
+  WHERE status = 'sent' AND (? IS NULL OR sent_at >= ?)
+  GROUP BY substr(sent_at, 1, 10)
+  ORDER BY day ASC
+`)
+const listManagedMembers = database.prepare(`
+  SELECT u.id, u.member_id, u.username, u.display_name, u.division_role,
+         u.must_change_password, u.is_active, u.created_at, u.last_login_at,
+         (SELECT COUNT(*) FROM private_messages sent
+          WHERE sent.sender_user_id = u.id AND sent.status = 'sent') AS sent_count,
+         (SELECT COUNT(*) FROM private_messages drafts
+          WHERE drafts.sender_user_id = u.id AND drafts.status = 'draft') AS draft_count,
+         (SELECT COUNT(*) FROM private_messages received
+          WHERE received.recipient_user_id = u.id AND received.status = 'sent') AS received_count,
+         (SELECT COUNT(*) FROM sessions active_session
+          WHERE active_session.user_id = u.id AND active_session.expires_at > CURRENT_TIMESTAMP) AS active_sessions
+  FROM users u
+  WHERE u.account_type = 'member'
+  ORDER BY u.member_id ASC
+`)
+const findManagedMember = database.prepare(`
+  SELECT id, member_id, username, display_name, division_role,
+         must_change_password, is_active, created_at, last_login_at
+  FROM users
+  WHERE member_id = ? AND account_type = 'member'
+  LIMIT 1
+`)
+const resetManagedMemberPassword = database.prepare(`
+  UPDATE users
+  SET password_hash = ?, password_salt = ?, must_change_password = 1,
+      updated_at = CURRENT_TIMESTAMP
+  WHERE id = ? AND account_type = 'member'
+`)
+const updateManagedMemberStatus = database.prepare(`
+  UPDATE users
+  SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE id = ? AND account_type = 'member'
+`)
+database.exec('DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP')
+
+const inboxReleaseAt = '2026-08-08T19:00:00+07:00'
+
+function inboxAccessUnlocked() {
+  return process.env.INBOX_UNLOCK_OVERRIDE === '1' || findGlobalMessageAccess.get()?.setting_value === 'unlocked'
+}
+
+const mimeTypes = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+}
+
+function sendJson(response, status, payload, extraHeaders = {}) {
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    ...extraHeaders,
+  })
+  response.end(JSON.stringify(payload))
+}
+
+async function readJson(request) {
+  let body = ''
+  for await (const chunk of request) {
+    body += chunk
+    if (body.length > 16_384) throw new Error('PAYLOAD_TOO_LARGE')
+  }
+  return JSON.parse(body || '{}')
+}
+
+async function authenticate(request, response) {
+  try {
+    const { username, password, remember } = await readJson(request)
+    if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
+      return sendJson(response, 400, { ok: false, message: 'Username dan kata sandi wajib diisi.' })
+    }
+
+    const user = findUser.get(username.trim())
+    const valid = user && verifyPassword(password, user.password_salt, user.password_hash)
+    if (!valid) {
+      await new Promise((resolve) => setTimeout(resolve, 180))
+      return sendJson(response, 401, { ok: false, message: 'Username atau kata sandi tidak sesuai.' })
+    }
+
+    recordLogin.run(user.id)
+    const sessionToken = randomBytes(32).toString('base64url')
+    const tokenHash = createHash('sha256').update(sessionToken).digest('hex')
+    const sessionDuration = remember ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000
+    const expiresAt = new Date(Date.now() + sessionDuration).toISOString().replace('T', ' ').replace('Z', '')
+    createSession.run(user.id, tokenHash, expiresAt)
+    const persistentCookie = remember ? '; Max-Age=2592000' : ''
+    const secureCookie = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+
+    return sendJson(response, 200, {
+      ok: true,
+      user: {
+        id: user.id,
+        memberId: user.member_id,
+        username: user.username,
+        name: user.display_name,
+        accountType: user.account_type,
+        role: user.division_role,
+        mustChangePassword: Boolean(user.must_change_password),
+      },
+    }, {
+      'Set-Cookie': `pulupulu_session=${sessionToken}; HttpOnly; SameSite=Strict; Path=/${persistentCookie}${secureCookie}`,
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Terjadi kesalahan pada server.' })
+  }
+}
+
+function readSessionToken(request) {
+  const cookies = request.headers.cookie?.split(';') || []
+  for (const cookie of cookies) {
+    const [name, ...valueParts] = cookie.trim().split('=')
+    if (name === 'pulupulu_session') return valueParts.join('=')
+  }
+  return ''
+}
+
+function authenticatedUser(request) {
+  const token = readSessionToken(request)
+  if (!token) return null
+
+  const tokenHash = createHash('sha256').update(token).digest('hex')
+  return findSession.get(tokenHash) || null
+}
+
+function currentSession(request, response) {
+  const user = authenticatedUser(request)
+  if (!user) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
+
+  return sendJson(response, 200, {
+    ok: true,
+    user: {
+      id: user.id,
+      memberId: user.member_id,
+      username: user.username,
+      name: user.display_name,
+      accountType: user.account_type,
+      role: user.division_role,
+      mustChangePassword: Boolean(user.must_change_password),
+    },
+  })
+}
+
+function requireAdmin(request, response) {
+  const user = authenticatedUser(request)
+  if (!user) {
+    sendJson(response, 401, { ok: false, message: 'Sesi admin sudah berakhir. Silakan masuk kembali.' })
+    return null
+  }
+  if (user.account_type !== 'admin') {
+    sendJson(response, 403, { ok: false, message: 'Halaman ini hanya dapat diakses oleh pengelola.' })
+    return null
+  }
+  return user
+}
+
+function adminPeriodDetails(period) {
+  if (period === '7d') return { period, days: 7 }
+  if (period === '30d') return { period, days: 30 }
+  return { period: 'all', days: 0 }
+}
+
+function getAdminOverview(request, response) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+
+  const url = new URL(request.url || '/', 'http://localhost')
+  const periodDetails = adminPeriodDetails(url.searchParams.get('period'))
+  const cutoff = periodDetails.days
+    ? new Date(Date.now() - periodDetails.days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '')
+    : null
+  const memberSummary = adminMemberSummary.get()
+  const messageSummary = adminMessageSummary.get(cutoff, cutoff)
+  const activeSessions = Number(adminActiveSessions.get().total || 0)
+  const totalMembers = Number(memberSummary.total_members || 0)
+  const sentMessages = Number(messageSummary.sent_messages || 0)
+  const completedPairs = Number(messageSummary.completed_pairs || 0)
+  const readMessages = Number(messageSummary.read_messages || 0)
+  const securedAccounts = Number(memberSummary.secured_accounts || 0)
+  const messageCapacity = totalMembers * Math.max(totalMembers - 1, 0)
+
+  const members = adminMemberMetrics.all(cutoff, cutoff, cutoff, cutoff, cutoff, cutoff).map((member) => ({
+    memberId: member.member_id,
+    username: member.username,
+    name: member.display_name,
+    role: member.division_role,
+    mustChangePassword: Boolean(member.must_change_password),
+    lastLoginAt: member.last_login_at,
+    sentCount: Number(member.sent_count || 0),
+    receivedCount: Number(member.received_count || 0),
+    readCount: Number(member.read_count || 0),
+  }))
+
+  const recentActivity = adminRecentMessages.all(cutoff, cutoff).map((message) => ({
+    id: message.id,
+    senderName: message.sender_name,
+    recipientName: message.recipient_name,
+    sentAt: message.sent_at,
+    readAt: message.read_at,
+    status: message.read_at ? 'read' : 'unread',
+  }))
+
+  return sendJson(response, 200, {
+    ok: true,
+    period: periodDetails.period,
+    generatedAt: new Date().toISOString(),
+    statistics: {
+      totalMembers,
+      sentMessages,
+      draftMessages: Number(messageSummary.draft_messages || 0),
+      readMessages,
+      unreadMessages: Math.max(sentMessages - readMessages, 0),
+      activeSenders: Number(messageSummary.active_senders || 0),
+      reachedRecipients: Number(messageSummary.reached_recipients || 0),
+      securedAccounts,
+      initialPasswordAccounts: Math.max(totalMembers - securedAccounts, 0),
+      membersLoggedIn: Number(memberSummary.members_logged_in || 0),
+      activeSessions,
+      messageCapacity,
+      completedPairs,
+      messageCompletion: messageCapacity ? Math.round((completedPairs / messageCapacity) * 100) : 0,
+      readRate: sentMessages ? Math.round((readMessages / sentMessages) * 100) : 0,
+      securityRate: totalMembers ? Math.round((securedAccounts / totalMembers) * 100) : 0,
+    },
+    recentActivity,
+    members,
+    divisions: adminDivisionSummary.all().map((division) => ({ role: division.role, total: Number(division.total) })),
+    dailyMessages: adminDailyMessages.all().map((day) => ({ day: day.day, total: Number(day.total) })),
+    privacy: 'Dashboard hanya menampilkan metadata pesan. Isi pesan privat tidak pernah disertakan.',
+  })
+}
+
+function getMessageCompletionProgress(request, response) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+
+  const url = new URL(request.url || '/', 'http://localhost')
+  const periodDetails = adminPeriodDetails(url.searchParams.get('period'))
+  const cutoff = periodDetails.days
+    ? new Date(Date.now() - periodDetails.days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '')
+    : null
+  const totalMembers = Number(adminMemberSummary.get().total_members || 0)
+  const targetPerMember = Math.max(totalMembers - 1, 0)
+  const targetPairs = totalMembers * targetPerMember
+  const summary = adminMessageSummary.get(cutoff, cutoff)
+  const completedPairs = Number(summary.completed_pairs || 0)
+  const members = adminCompletionMembers.all(cutoff, cutoff, cutoff, cutoff, cutoff, cutoff, cutoff, cutoff).map((member) => {
+    const completedRecipients = Number(member.completed_recipients || 0)
+    return {
+      memberId: member.member_id,
+      name: member.display_name,
+      role: member.division_role,
+      completedRecipients,
+      receivedFrom: Number(member.received_from || 0),
+      draftCount: Number(member.draft_count || 0),
+      openedByRecipients: Number(member.opened_by_recipients || 0),
+      target: targetPerMember,
+      progress: targetPerMember ? Math.round((completedRecipients / targetPerMember) * 100) : 0,
+    }
+  })
+  const divisions = new Map()
+  for (const member of members) {
+    const division = divisions.get(member.role) || { role: member.role, members: 0, completedPairs: 0, targetPairs: 0 }
+    division.members += 1
+    division.completedPairs += member.completedRecipients
+    division.targetPairs += targetPerMember
+    divisions.set(member.role, division)
+  }
+
+  return sendJson(response, 200, {
+    ok: true,
+    period: periodDetails.period,
+    generatedAt: new Date().toISOString(),
+    accessUnlocked: inboxAccessUnlocked(),
+    statistics: {
+      totalMembers,
+      targetPerMember,
+      targetPairs,
+      completedPairs,
+      remainingPairs: Math.max(targetPairs - completedPairs, 0),
+      completionPercentage: targetPairs ? Math.round((completedPairs / targetPairs) * 100) : 0,
+      totalMessages: Number(summary.sent_messages || 0),
+      totalDrafts: Number(summary.draft_messages || 0),
+      membersStarted: members.filter((member) => member.completedRecipients > 0).length,
+      membersCompleted: members.filter((member) => member.completedRecipients >= targetPerMember && targetPerMember > 0).length,
+      averagePerMember: totalMembers ? Number((completedPairs / totalMembers).toFixed(1)) : 0,
+    },
+    members,
+    divisions: Array.from(divisions.values()).map((division) => ({
+      ...division,
+      progress: division.targetPairs ? Math.round((division.completedPairs / division.targetPairs) * 100) : 0,
+    })).sort((left, right) => right.progress - left.progress || left.role.localeCompare(right.role)),
+    pairs: adminCompletedPairs.all(cutoff, cutoff).map((pair) => ({
+      senderMemberId: pair.sender_member_id,
+      recipientMemberId: pair.recipient_member_id,
+      sentAt: pair.sent_at,
+      isRead: Boolean(pair.is_read),
+    })),
+    timeline: adminCompletionTimeline.all(cutoff, cutoff).map((item) => ({
+      day: item.day,
+      messages: Number(item.messages),
+      completedPairs: Number(item.completed_pairs),
+    })),
+  })
+}
+
+function serializeManagedMember(member) {
+  return {
+    memberId: member.member_id,
+    username: member.username,
+    name: member.display_name,
+    role: member.division_role,
+    mustChangePassword: Boolean(member.must_change_password),
+    isActive: Boolean(member.is_active),
+    createdAt: member.created_at,
+    lastLoginAt: member.last_login_at,
+    sentCount: Number(member.sent_count || 0),
+    draftCount: Number(member.draft_count || 0),
+    receivedCount: Number(member.received_count || 0),
+    activeSessions: Number(member.active_sessions || 0),
+  }
+}
+
+function getManagedMembers(request, response) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+  const members = listManagedMembers.all().map(serializeManagedMember)
+  return sendJson(response, 200, {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    summary: {
+      total: members.length,
+      active: members.filter((member) => member.isActive).length,
+      inactive: members.filter((member) => !member.isActive).length,
+      initialPassword: members.filter((member) => member.mustChangePassword).length,
+      activeSessions: members.reduce((total, member) => total + member.activeSessions, 0),
+    },
+    members,
+  })
+}
+
+function temporaryPassword() {
+  const words = ['Bahari', 'Karang', 'Nautika', 'Samudra', 'Pesisir', 'Senja']
+  const random = randomBytes(4)
+  const word = words[random[0] % words.length]
+  const number = ((random[1] << 8 | random[2]) % 10_000).toString().padStart(4, '0')
+  const symbols = ['!', '@', '#', '$']
+  return `Pulu${word}${symbols[random[3] % symbols.length]}${number}`
+}
+
+async function resetMemberPassword(request, response, memberId) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+  if (!Number.isInteger(memberId)) return sendJson(response, 400, { ok: false, message: 'Anggota tidak valid.' })
+  try {
+    const payload = await readJson(request)
+    if (payload.confirmation !== 'RESET KATA SANDI') return sendJson(response, 422, { ok: false, message: 'Konfirmasi reset kata sandi tidak sesuai.' })
+    const member = findManagedMember.get(memberId)
+    if (!member) return sendJson(response, 404, { ok: false, message: 'Akun anggota tidak ditemukan.' })
+
+    const password = temporaryPassword()
+    const nextPassword = hashPassword(password)
+    database.exec('BEGIN IMMEDIATE')
+    let revokedSessions = 0
+    try {
+      resetManagedMemberPassword.run(nextPassword.hash, nextPassword.salt, member.id)
+      revokedSessions = Number(deleteAllUserSessions.run(member.id).changes)
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+
+    return sendJson(response, 200, {
+      ok: true,
+      message: `Kata sandi ${member.display_name} berhasil direset.`,
+      temporaryPassword: password,
+      revokedSessions,
+      member: { memberId: member.member_id, mustChangePassword: true },
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Kata sandi anggota belum dapat direset.' })
+  }
+}
+
+async function changeManagedMemberStatus(request, response, memberId) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+  if (!Number.isInteger(memberId)) return sendJson(response, 400, { ok: false, message: 'Anggota tidak valid.' })
+
+  try {
+    const payload = await readJson(request)
+    if (typeof payload.active !== 'boolean') return sendJson(response, 422, { ok: false, message: 'Status akun tidak valid.' })
+    const expectedConfirmation = payload.active ? 'AKTIFKAN ANGGOTA' : 'NONAKTIFKAN ANGGOTA'
+    if (payload.confirmation !== expectedConfirmation) return sendJson(response, 422, { ok: false, message: 'Konfirmasi perubahan status tidak sesuai.' })
+
+    const member = findManagedMember.get(memberId)
+    if (!member) return sendJson(response, 404, { ok: false, message: 'Akun anggota tidak ditemukan.' })
+    let revokedSessions = 0
+    if (Boolean(member.is_active) !== payload.active) {
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        updateManagedMemberStatus.run(payload.active ? 1 : 0, member.id)
+        if (!payload.active) revokedSessions = Number(deleteAllUserSessions.run(member.id).changes)
+        database.exec('COMMIT')
+      } catch (error) {
+        database.exec('ROLLBACK')
+        throw error
+      }
+    }
+
+    return sendJson(response, 200, {
+      ok: true,
+      message: payload.active ? `Akun ${member.display_name} berhasil diaktifkan.` : `Akun ${member.display_name} berhasil dinonaktifkan.`,
+      revokedSessions,
+      member: { memberId: member.member_id, isActive: payload.active },
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Status akun belum dapat diperbarui.' })
+  }
+}
+
+function serializeGlobalMessageAccess() {
+  const setting = findGlobalMessageAccess.get()
+  const impact = globalMessageAccessImpact.get()
+  const unlocked = setting?.setting_value === 'unlocked'
+  return {
+    unlocked,
+    status: unlocked ? 'unlocked' : 'locked',
+    updatedAt: setting?.updated_at || null,
+    updatedBy: setting?.updated_by_name || 'Database seeder',
+    plannedReleaseAt: inboxReleaseAt,
+    impact: {
+      sentMessages: Number(impact.sent_messages || 0),
+      unreadMessages: Number(impact.unread_messages || 0),
+      recipientsWithMessages: Number(impact.recipients_with_messages || 0),
+      totalMembers: Number(adminMemberSummary.get().total_members || 0),
+    },
+  }
+}
+
+function getGlobalMessageAccess(request, response) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+  return sendJson(response, 200, { ok: true, access: serializeGlobalMessageAccess() })
+}
+
+async function changeGlobalMessageAccess(request, response) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+
+  try {
+    const payload = await readJson(request)
+    if (typeof payload.unlocked !== 'boolean') {
+      return sendJson(response, 422, { ok: false, message: 'Status akses pesan tidak valid.' })
+    }
+
+    const expectedConfirmation = payload.unlocked ? 'BUKA SEMUA SURAT' : 'KUNCI SEMUA SURAT'
+    if (payload.confirmation !== expectedConfirmation) {
+      return sendJson(response, 422, { ok: false, message: 'Konfirmasi perubahan akses tidak sesuai.' })
+    }
+
+    const current = findGlobalMessageAccess.get()?.setting_value === 'unlocked'
+    if (current !== payload.unlocked) {
+      updateGlobalMessageAccess.get(payload.unlocked ? 'unlocked' : 'locked', admin.id)
+    }
+
+    return sendJson(response, 200, {
+      ok: true,
+      changed: current !== payload.unlocked,
+      message: payload.unlocked ? 'Akses seluruh surat berhasil dibuka.' : 'Akses seluruh surat berhasil dikunci.',
+      access: serializeGlobalMessageAccess(),
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Status akses belum dapat diperbarui.' })
+  }
+}
+
+function passwordValidationMessage(password, username) {
+  if (password.length < 10) return 'Kata sandi baru minimal 10 karakter.'
+  if (password.length > 128) return 'Kata sandi baru maksimal 128 karakter.'
+  if (!/[a-z]/.test(password)) return 'Kata sandi baru perlu memuat huruf kecil.'
+  if (!/[A-Z]/.test(password)) return 'Kata sandi baru perlu memuat huruf kapital.'
+  if (!/\d/.test(password)) return 'Kata sandi baru perlu memuat angka.'
+  if (!/[^A-Za-z0-9]/.test(password)) return 'Kata sandi baru perlu memuat simbol.'
+
+  const usernameParts = username.toLowerCase().split(/[^a-z0-9]+/).filter((part) => part.length >= 3)
+  if (usernameParts.some((part) => password.toLowerCase().includes(part))) {
+    return 'Kata sandi baru tidak boleh memuat bagian dari username.'
+  }
+  return ''
+}
+
+async function changePassword(request, response) {
+  const sessionUser = authenticatedUser(request)
+  if (!sessionUser) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
+
+  try {
+    const payload = await readJson(request)
+    const currentPassword = typeof payload.currentPassword === 'string' ? payload.currentPassword : ''
+    const newPassword = typeof payload.newPassword === 'string' ? payload.newPassword : ''
+    const confirmPassword = typeof payload.confirmPassword === 'string' ? payload.confirmPassword : ''
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return sendJson(response, 422, { ok: false, message: 'Semua kolom kata sandi wajib diisi.' })
+    }
+    if (newPassword !== confirmPassword) {
+      return sendJson(response, 422, { ok: false, message: 'Konfirmasi kata sandi baru belum sama.' })
+    }
+
+    const validationMessage = passwordValidationMessage(newPassword, sessionUser.username)
+    if (validationMessage) return sendJson(response, 422, { ok: false, message: validationMessage })
+
+    const passwordUser = findPasswordUserById.get(sessionUser.id)
+    if (!passwordUser || !verifyPassword(currentPassword, passwordUser.password_salt, passwordUser.password_hash)) {
+      await new Promise((resolve) => setTimeout(resolve, 180))
+      return sendJson(response, 422, { ok: false, message: 'Kata sandi saat ini tidak sesuai.' })
+    }
+    if (verifyPassword(newPassword, passwordUser.password_salt, passwordUser.password_hash)) {
+      return sendJson(response, 422, { ok: false, message: 'Kata sandi baru harus berbeda dari kata sandi saat ini.' })
+    }
+
+    const nextPassword = hashPassword(newPassword)
+    const tokenHash = createHash('sha256').update(readSessionToken(request)).digest('hex')
+    database.exec('BEGIN IMMEDIATE')
+    let revokedSessions = 0
+    try {
+      updateUserPassword.run(nextPassword.hash, nextPassword.salt, sessionUser.id)
+      revokedSessions = Number(deleteOtherUserSessions.run(sessionUser.id, tokenHash).changes)
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+
+    return sendJson(response, 200, {
+      ok: true,
+      message: 'Kata sandi berhasil diperbarui.',
+      sessionsRevoked: revokedSessions,
+      user: { mustChangePassword: false },
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Kata sandi belum dapat diperbarui.' })
+  }
+}
+
+function messageParticipants(request, response, recipientMemberId) {
+  const sender = authenticatedUser(request)
+  if (!sender) {
+    sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
+    return null
+  }
+  if (!sender.member_id) {
+    sendJson(response, 403, { ok: false, message: 'Hanya akun anggota yang dapat menulis pesan pribadi.' })
+    return null
+  }
+  if (!Number.isInteger(recipientMemberId)) {
+    sendJson(response, 400, { ok: false, message: 'Penerima pesan tidak valid.' })
+    return null
+  }
+
+  const recipient = findRecipientByMemberId.get(recipientMemberId)
+  if (!recipient) {
+    sendJson(response, 404, { ok: false, message: 'Anggota penerima tidak ditemukan.' })
+    return null
+  }
+  if (recipient.id === sender.id) {
+    sendJson(response, 400, { ok: false, message: 'Kamu tidak dapat mengirim pesan kepada diri sendiri.' })
+    return null
+  }
+
+  return { sender, recipient }
+}
+
+function messageFields(payload) {
+  const title = typeof payload.title === 'string' ? payload.title.trim() : ''
+  const body = typeof payload.body === 'string' ? payload.body : ''
+  const closing = typeof payload.closing === 'string' ? payload.closing.trim() : ''
+
+  if (title.length > 60) return { error: 'Judul pesan maksimal 60 karakter.' }
+  if (body.length > 1500) return { error: 'Isi pesan maksimal 1.500 karakter.' }
+  if (closing.length > 80) return { error: 'Kalimat penutup maksimal 80 karakter.' }
+  return { title, body, closing }
+}
+
+function serializeDraft(row, recipientMemberId) {
+  if (!row) return null
+  return {
+    id: row.id,
+    recipientMemberId,
+    title: row.title,
+    body: row.body,
+    closing: row.closing,
+    status: row.status,
+    updatedAt: row.updated_at,
+  }
+}
+
+function getMessageDraft(request, response) {
+  const url = new URL(request.url || '/', 'http://localhost')
+  const recipientMemberId = Number(url.searchParams.get('recipientMemberId'))
+  const participants = messageParticipants(request, response, recipientMemberId)
+  if (!participants) return
+
+  const draft = findDraft.get(participants.sender.id, participants.recipient.id)
+  return sendJson(response, 200, { ok: true, draft: serializeDraft(draft, recipientMemberId) })
+}
+
+async function saveMessageDraft(request, response) {
+  try {
+    const payload = await readJson(request)
+    const recipientMemberId = Number(payload.recipientMemberId)
+    const participants = messageParticipants(request, response, recipientMemberId)
+    if (!participants) return
+
+    const fields = messageFields(payload)
+    if (fields.error) return sendJson(response, 422, { ok: false, message: fields.error })
+
+    if (!fields.title && !fields.body.trim() && !fields.closing) {
+      deleteDraft.run(participants.sender.id, participants.recipient.id)
+      return sendJson(response, 200, { ok: true, draft: null, deleted: true })
+    }
+
+    const draft = upsertDraft.get(
+      participants.sender.id,
+      participants.recipient.id,
+      fields.title,
+      fields.body,
+      fields.closing,
+    )
+    return sendJson(response, 200, { ok: true, draft: serializeDraft(draft, recipientMemberId) })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format draf tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Draf terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Draf belum dapat disimpan.' })
+  }
+}
+
+async function sendPrivateMessage(request, response) {
+  try {
+    const payload = await readJson(request)
+    const recipientMemberId = Number(payload.recipientMemberId)
+    const participants = messageParticipants(request, response, recipientMemberId)
+    if (!participants) return
+
+    const fields = messageFields(payload)
+    if (fields.error) return sendJson(response, 422, { ok: false, message: fields.error })
+    const trimmedBody = fields.body.trim()
+    if (trimmedBody.length < 20) {
+      return sendJson(response, 422, { ok: false, message: 'Isi pesan minimal 20 karakter agar kenanganmu tersampaikan dengan utuh.' })
+    }
+
+    database.exec('BEGIN IMMEDIATE')
+    let message
+    try {
+      message = sendExistingDraft.get(
+        fields.title,
+        trimmedBody,
+        fields.closing,
+        participants.sender.id,
+        participants.recipient.id,
+      )
+      if (!message) {
+        message = insertSentMessage.get(
+          participants.sender.id,
+          participants.recipient.id,
+          fields.title,
+          trimmedBody,
+          fields.closing,
+        )
+      }
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+
+    return sendJson(response, 201, {
+      ok: true,
+      message: {
+        id: message.id,
+        status: message.status,
+        recipientMemberId,
+        sentAt: message.sent_at,
+      },
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format pesan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Pesan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Pesan belum dapat dikirim.' })
+  }
+}
+
+function getPrivateInbox(request, response) {
+  const recipient = authenticatedUser(request)
+  if (!recipient) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
+  if (!recipient.member_id) return sendJson(response, 403, { ok: false, message: 'Inbox privat hanya tersedia untuk akun anggota.' })
+
+  const accessUnlocked = inboxAccessUnlocked()
+  const messages = listInboxMessages.all(recipient.id).map((message) => ({
+    id: message.id,
+    sentAt: message.sent_at,
+    unlockAt: message.unlock_at,
+    locked: !accessUnlocked,
+    sender: {
+      memberId: message.sender_member_id,
+      name: message.sender_name,
+      role: message.sender_role,
+    },
+  }))
+
+  return sendJson(response, 200, {
+    ok: true,
+    releaseAt: inboxReleaseAt,
+    accessUnlocked,
+    messages,
+  })
+}
+
+function requireOpenInbox(request, response) {
+  const recipient = authenticatedUser(request)
+  if (!recipient) {
+    sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
+    return null
+  }
+  if (!recipient.member_id) {
+    sendJson(response, 403, { ok: false, message: 'Inbox privat hanya tersedia untuk akun anggota.' })
+    return null
+  }
+  if (!inboxAccessUnlocked()) {
+    sendJson(response, 423, { ok: false, message: 'Surat masih tersegel sampai malam perpisahan.', releaseAt: inboxReleaseAt })
+    return null
+  }
+  return recipient
+}
+
+function getOpenPrivateInbox(request, response) {
+  const recipient = requireOpenInbox(request, response)
+  if (!recipient) return
+
+  const messages = listOpenInboxMessages.all(recipient.id).map((message) => ({
+    id: message.id,
+    title: message.title,
+    body: message.body,
+    closing: message.closing,
+    sentAt: message.sent_at,
+    unlockAt: message.unlock_at,
+    readAt: message.read_at,
+    isRead: Boolean(message.read_at),
+    sender: {
+      memberId: message.sender_member_id,
+      name: message.sender_name,
+      role: message.sender_role,
+    },
+  }))
+
+  return sendJson(response, 200, { ok: true, releaseAt: inboxReleaseAt, messages })
+}
+
+function serializeOpenMessage(message) {
+  return {
+    id: message.id,
+    title: message.title,
+    body: message.body,
+    closing: message.closing,
+    sentAt: message.sent_at,
+    unlockAt: message.unlock_at,
+    readAt: message.read_at,
+    isRead: Boolean(message.read_at),
+    sender: {
+      memberId: message.sender_member_id,
+      name: message.sender_name,
+      role: message.sender_role,
+    },
+  }
+}
+
+function getOpenPrivateMessage(request, response, messageId) {
+  const recipient = requireOpenInbox(request, response)
+  if (!recipient) return
+  if (!Number.isInteger(messageId)) return sendJson(response, 400, { ok: false, message: 'Surat tidak valid.' })
+
+  const message = findOpenInboxMessage.get(messageId, recipient.id)
+  if (!message) return sendJson(response, 404, { ok: false, message: 'Surat tidak ditemukan di inbox-mu.' })
+  return sendJson(response, 200, { ok: true, message: serializeOpenMessage(message) })
+}
+
+function markPrivateMessageRead(request, response, messageId) {
+  const recipient = requireOpenInbox(request, response)
+  if (!recipient) return
+  if (!Number.isInteger(messageId)) return sendJson(response, 400, { ok: false, message: 'Surat tidak valid.' })
+
+  const message = markInboxMessageRead.get(messageId, recipient.id)
+  if (!message) return sendJson(response, 404, { ok: false, message: 'Surat tidak ditemukan di inbox-mu.' })
+  return sendJson(response, 200, { ok: true, message: { id: message.id, readAt: message.read_at, isRead: true } })
+}
+
+function markAllPrivateMessagesRead(request, response) {
+  const recipient = requireOpenInbox(request, response)
+  if (!recipient) return
+  const result = markAllInboxMessagesRead.run(recipient.id)
+  return sendJson(response, 200, { ok: true, updated: Number(result.changes) })
+}
+
+function logout(request, response) {
+  const token = readSessionToken(request)
+  if (token) deleteSession.run(createHash('sha256').update(token).digest('hex'))
+  return sendJson(response, 200, { ok: true }, {
+    'Set-Cookie': 'pulupulu_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+  })
+}
+
+function serveStatic(request, response) {
+  if (!existsSync(join(distRoot, 'index.html'))) {
+    return sendJson(response, 503, {
+      ok: false,
+      message: 'Build frontend belum tersedia. Jalankan npm run build terlebih dahulu.',
+    })
+  }
+
+  const url = new URL(request.url || '/', 'http://localhost')
+  const requestedPath = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '')
+  let filePath = join(distRoot, requestedPath)
+
+  if (!filePath.startsWith(distRoot) || !existsSync(filePath) || statSync(filePath).isDirectory()) {
+    filePath = join(distRoot, 'index.html')
+  }
+
+  response.writeHead(200, {
+    'Content-Type': mimeTypes[extname(filePath)] || 'application/octet-stream',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+  })
+  createReadStream(filePath).pipe(response)
+}
+
+const server = createServer(async (request, response) => {
+  if (request.method === 'POST' && request.url?.startsWith('/api/auth/login')) {
+    return authenticate(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/auth/session')) {
+    return currentSession(request, response)
+  }
+  if (request.method === 'POST' && request.url?.startsWith('/api/auth/logout')) {
+    return logout(request, response)
+  }
+  if (request.method === 'PATCH' && request.url?.startsWith('/api/account/password')) {
+    return changePassword(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/admin/overview')) {
+    return getAdminOverview(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/admin/message-access')) {
+    return getGlobalMessageAccess(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/admin/message-progress')) {
+    return getMessageCompletionProgress(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/admin/members')) {
+    return getManagedMembers(request, response)
+  }
+  const resetMemberPasswordMatch = request.url?.match(/^\/api\/admin\/members\/(\d+)\/reset-password(?:\?.*)?$/)
+  if (request.method === 'POST' && resetMemberPasswordMatch) {
+    return resetMemberPassword(request, response, Number(resetMemberPasswordMatch[1]))
+  }
+  const memberStatusMatch = request.url?.match(/^\/api\/admin\/members\/(\d+)\/status(?:\?.*)?$/)
+  if (request.method === 'PATCH' && memberStatusMatch) {
+    return changeManagedMemberStatus(request, response, Number(memberStatusMatch[1]))
+  }
+  if (request.method === 'PATCH' && request.url?.startsWith('/api/admin/message-access')) {
+    return changeGlobalMessageAccess(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/messages/draft')) {
+    return getMessageDraft(request, response)
+  }
+  if (request.method === 'PUT' && request.url?.startsWith('/api/messages/draft')) {
+    return saveMessageDraft(request, response)
+  }
+  if (request.method === 'POST' && request.url?.startsWith('/api/messages/send')) {
+    return sendPrivateMessage(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/messages/inbox')) {
+    return getPrivateInbox(request, response)
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/messages/open-inbox')) {
+    return getOpenPrivateInbox(request, response)
+  }
+  if (request.method === 'PATCH' && request.url?.startsWith('/api/messages/read-all')) {
+    return markAllPrivateMessagesRead(request, response)
+  }
+  const openMessageMatch = request.url?.match(/^\/api\/messages\/(\d+)(?:\?.*)?$/)
+  if (request.method === 'GET' && openMessageMatch) {
+    return getOpenPrivateMessage(request, response, Number(openMessageMatch[1]))
+  }
+  const readMessageMatch = request.url?.match(/^\/api\/messages\/(\d+)\/read(?:\?.*)?$/)
+  if (request.method === 'PATCH' && readMessageMatch) {
+    return markPrivateMessageRead(request, response, Number(readMessageMatch[1]))
+  }
+  if (request.method === 'GET' && request.url?.startsWith('/api/health')) {
+    return sendJson(response, 200, { ok: true, database: databasePath })
+  }
+  if (request.method === 'GET' || request.method === 'HEAD') return serveStatic(request, response)
+  return sendJson(response, 405, { ok: false, message: 'Metode tidak diizinkan.' })
+})
+
+server.listen(port, '127.0.0.1', () => {
+  console.log(`Pulupulu server ready at http://127.0.0.1:${port}`)
+})
+
+function shutdown() {
+  server.close(() => {
+    database.close()
+    process.exit(0)
+  })
+}
+
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
