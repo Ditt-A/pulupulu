@@ -88,6 +88,11 @@ export function createSchema(database) {
     VALUES ('global_message_access', 'locked')
   `).run()
 
+  database.prepare(`
+    INSERT OR IGNORE INTO app_settings (setting_key, setting_value)
+    VALUES ('global_message_release_at', '2026-08-08T19:00:00+07:00')
+  `).run()
+
   const messageColumns = database.prepare('PRAGMA table_info(private_messages)').all()
   if (!messageColumns.some((column) => column.name === 'unlock_at')) {
     database.exec("ALTER TABLE private_messages ADD COLUMN unlock_at TEXT NOT NULL DEFAULT '2026-08-08T19:00:00+07:00'")

@@ -12,5 +12,5 @@ export const seedAccounts = [
   { memberId: 11, username: 'm.aditya.akbar', password: 'MAditya#Surut33!', displayName: 'M. Aditya Akbar', divisionRole: 'Perkap', accountType: 'member' },
   { memberId: 12, username: 'christama.ezra', password: 'Christama#Biru33!', displayName: 'Christama Ezra Y.', divisionRole: 'DDM', accountType: 'member' },
   { memberId: 13, username: 'albert.pasunda', password: 'Albert#Horizon08!', displayName: 'Albert J. Pasunda', divisionRole: 'DDM', accountType: 'member' },
-  { memberId: null, username: 'admin.mmd33', password: 'Admin#Pulupulu33', displayName: 'Administrator KKN 08', divisionRole: 'Administrator', accountType: 'admin' },
+  { memberId: null, username: 'admin.mmd33', password: 'Admin#Pulupulu33', displayName: 'Administrator MMD FILKOM 33', divisionRole: 'Administrator', accountType: 'admin' },
 ]

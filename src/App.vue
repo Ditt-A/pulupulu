@@ -7,6 +7,7 @@ import GalleryCard from '@/components/cards/GalleryCard.vue'
 import MemberCard from '@/components/cards/MemberCard.vue'
 import TimelineItem from '@/components/cards/TimelineItem.vue'
 import AppButton from '@/components/ui/AppButton.vue'
+import GalleryPage from '@/views/GalleryPage.vue'
 import LoginPage from '@/views/LoginPage.vue'
 import MemberDashboard from '@/views/MemberDashboard.vue'
 import MessageRecipientPage from '@/views/MessageRecipientPage.vue'
@@ -20,8 +21,10 @@ import AdminMessageAccessPage from '@/views/AdminMessageAccessPage.vue'
 import AdminMessageMonitoringPage from '@/views/AdminMessageMonitoringPage.vue'
 import AdminMembersPage from '@/views/AdminMembersPage.vue'
 import { members } from '@/data/members'
+import { landingGallery } from '@/data/gallery'
 
 const isLoginPage = window.location.pathname.replace(/\/$/, '') === '/login'
+const isGalleryPage = window.location.pathname.replace(/\/$/, '') === '/galeri'
 const isDashboardPage = window.location.pathname.replace(/\/$/, '') === '/dashboard'
 const isRecipientPage = window.location.pathname.replace(/\/$/, '') === '/dashboard/pesan/baru'
 const isComposerPage = window.location.pathname.replace(/\/$/, '') === '/dashboard/pesan/tulis'
@@ -38,15 +41,7 @@ const messageReaderId = Number(messageReaderMatch?.[1] || 0)
 let revealObserver: IntersectionObserver | undefined
 let animationFrame = 0
 
-const gallery = [
-  { image: '/images/kkn-group-hero.png', title: 'Satu bingkai, tiga belas cerita', date: '12 Juli 2026', location: 'Pantai Pesisir Harapan', caption: 'Potret pertama sebelum kami benar-benar saling mengenal.', count: 13, size: 'wide' as const },
-  { image: 'https://images.unsplash.com/photo-1529156069898-49953e39b3ac?auto=format&fit=crop&w=1000&q=88', title: 'Teman yang perlahan jadi rumah', date: '16 Juli 2026', location: 'Posko KKN', caption: 'Tidak ada agenda. Hanya sore, cerita, dan tawa yang panjang.', count: 18, size: 'tall' as const },
-  { image: 'https://images.unsplash.com/photo-1517486808906-6ca8b3f04846?auto=format&fit=crop&w=1000&q=88', title: 'Hari ketika semua ikut turun tangan', date: '22 Juli 2026', location: 'Balai Desa', caption: 'Pekerjaan besar terasa ringan ketika dilakukan bersama.', count: 24, size: 'normal' as const },
-  { image: 'https://images.unsplash.com/photo-1559027615-cd4628902d4a?auto=format&fit=crop&w=1000&q=88', title: 'Mengabdi, juga belajar', date: '27 Juli 2026', location: 'Dusun Bahari', caption: 'Desa ini memberi kami jauh lebih banyak dari yang kami bawa.', count: 31, size: 'polaroid' as const },
-  { image: 'https://images.unsplash.com/photo-1506869640319-fe1a24fd76dc?auto=format&fit=crop&w=1000&q=88', title: 'Jeda di antara kesibukan', date: '31 Juli 2026', location: 'Teras Posko', caption: 'Lima menit istirahat yang berubah jadi satu jam bercerita.', count: 16, size: 'normal' as const },
-  { image: 'https://images.unsplash.com/photo-1527529482837-4698179dc6ce?auto=format&fit=crop&w=1000&q=88', title: 'Malam yang tak ingin selesai', date: '7 Agustus 2026', location: 'Halaman Posko', caption: 'Bernyanyi pelan agar besok datang sedikit lebih lambat.', count: 28, size: 'tall' as const },
-  { image: '/images/kkn-coast-sunset.png', title: 'Senja terakhir di pesisir', date: '8 Agustus 2026', location: 'Garis Pantai', caption: 'Laut yang sama, arah pulang yang berbeda.', count: 27, size: 'wide' as const },
-]
+const gallery = landingGallery
 
 const journey = [
   { date: '01 · 12 Juli 2026', title: 'Hari Pertama', description: 'Kami datang sebagai tiga belas orang dengan koper, nama yang belum hafal, dan sedikit rasa canggung. Laut menjadi saksi sapaan pertama.', image: '/images/kkn-group-hero.png' },
@@ -82,8 +77,12 @@ function goToLogin() {
   window.location.assign('/login')
 }
 
+function goToGallery() {
+  window.location.assign('/galeri')
+}
+
 onMounted(() => {
-  if (isLoginPage || isDashboardPage || isRecipientPage || isComposerPage || isInboxPage || isOpenInboxPage || isProfilePage || isAdminPage || isAdminAccessPage || isAdminMonitoringPage || isAdminMembersPage || isMessageReaderPage) return
+  if (isLoginPage || isGalleryPage || isDashboardPage || isRecipientPage || isComposerPage || isInboxPage || isOpenInboxPage || isProfilePage || isAdminPage || isAdminAccessPage || isAdminMonitoringPage || isAdminMembersPage || isMessageReaderPage) return
   revealObserver = new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
       if (entry.isIntersecting) entry.target.classList.add('is-visible')
@@ -103,6 +102,7 @@ onUnmounted(() => {
 
 <template>
   <LoginPage v-if="isLoginPage" />
+  <GalleryPage v-else-if="isGalleryPage" />
   <AdminMembersPage v-else-if="isAdminMembersPage" />
   <AdminMessageMonitoringPage v-else-if="isAdminMonitoringPage" />
   <AdminMessageAccessPage v-else-if="isAdminAccessPage" />
@@ -134,7 +134,7 @@ onUnmounted(() => {
           <p class="landing-hero__copy">Cerita tentang pengabdian, kebersamaan, tawa, dan orang-orang yang membuat perjalanan ini lebih berarti.</p>
           <div class="landing-hero__actions">
             <AppButton icon @click="scrollTo('#perjalanan')">Lihat Perjalanan Kami</AppButton>
-            <AppButton variant="secondary" icon @click="scrollTo('#penutup')">Tulis Kesan dan Pesan</AppButton>
+            <AppButton variant="secondary" icon @click="goToLogin">Tulis Kesan dan Pesan</AppButton>
           </div>
         </div>
 
@@ -143,9 +143,9 @@ onUnmounted(() => {
           <i />
           <span><small>Lokasi</small><strong>Desa Sumbersih</strong></span>
           <i />
-          <span><small>Almamater</small><strong>Universitas Brawijaya</strong></span>
+          <span><small>Kampus</small><strong>Universitas Brawijaya</strong></span>
           <i />
-          <span><small>Pelaksanaan</small><strong>Juli—Agustus 2026</strong></span>
+          <span><small>Pelaksanaan</small><strong>Juli - Agustus 2026</strong></span>
         </div>
 
         <button class="landing-hero__scroll" aria-label="Gulir ke cerita kami" @click="scrollTo('#cerita')">
@@ -190,7 +190,7 @@ onUnmounted(() => {
 
           <footer class="memory-gallery__footer reveal" data-reveal>
             <span><Camera :size="18" /> 1.248 foto dari 30 hari perjalanan</span>
-            <AppButton variant="secondary" icon>Lihat galeri lengkap</AppButton>
+            <AppButton variant="secondary" icon @click="goToGallery">Lihat galeri lengkap</AppButton>
           </footer>
         </div>
         <svg class="ocean-to-foam" viewBox="0 0 1440 140" preserveAspectRatio="none" aria-hidden="true"><path d="M0 82 C175 18 330 127 535 72 C770 9 915 126 1145 70 C1270 40 1370 54 1440 78 L1440 140 L0 140 Z" fill="#e7f2ef"/><path d="M0 104 C190 48 355 148 560 94 C765 40 935 142 1165 92 C1285 66 1375 72 1440 98" fill="none" stroke="rgba(255,255,255,.75)" stroke-width="3"/></svg>
@@ -245,7 +245,7 @@ onUnmounted(() => {
           <p class="eyebrow eyebrow--light">Sampai bertemu di cerita berikutnya</p>
           <h2>Perjalanannya selesai.<br /><em>Kenangannya tetap berlayar.</em></h2>
           <p>Tinggalkan satu pesan kecil untuk orang-orang yang membuat tiga puluh hari ini terasa seperti rumah.</p>
-          <div><AppButton icon>Tulis Kesan dan Pesan</AppButton><AppButton variant="secondary" icon @click="goToLogin">Masuk ke Ruang Anggota</AppButton></div>
+          <div><AppButton icon @click="goToLogin">Tulis Kesan dan Pesan</AppButton></div>
         </div>
       </section>
     </main>
@@ -253,11 +253,11 @@ onUnmounted(() => {
     <footer class="landing-footer">
       <svg class="landing-footer__texture" viewBox="0 0 1440 140" preserveAspectRatio="none" aria-hidden="true"><path d="M-30 80 C180 10 355 142 570 72 S970 140 1190 75 S1400 58 1480 86"/><path d="M-40 108 C190 48 360 166 590 103 S970 165 1210 105 S1380 92 1480 112"/></svg>
       <div class="section-shell landing-footer__grid">
-        <div class="landing-footer__brand"><a href="#beranda"><span><Waves :size="24" /></span><b>PULUPULU</b></a><p>Arsip digital keluarga kecil MMD FILKOM 33 di Desa Pesisir Harapan.</p></div>
+        <div class="landing-footer__brand"><a href="#beranda"><span><Waves :size="24" /></span><b>PULUPULU</b></a><p>Arsip digital keluarga kecil MMD FILKOM 33 di Desa Sumbersih.</p></div>
         <nav><strong>Jelajahi</strong><a href="#cerita">Cerita Kami</a><a href="#galeri">Galeri</a><a href="#perjalanan">Perjalanan</a><a href="#anggota">Anggota</a></nav>
-        <div class="landing-footer__meta"><strong>Pelaksanaan</strong><span><CalendarDays :size="14" /> Juli—Agustus 2026</span><span><MapPin :size="14" /> Desa Pesisir Harapan</span><span>Universitas Nusantara</span></div>
+        <div class="landing-footer__meta"><strong>Pelaksanaan</strong><span><CalendarDays :size="14" /> Juli - Agustus 2026</span><span><MapPin :size="14" /> Desa Sumbersih</span><span>Universitas Brawijaya</span></div>
       </div>
-      <div class="section-shell landing-footer__bottom"><span>© 2026 MMD FILKOM 33</span><p>Dibuat dengan rindu, di antara ombak dan jalan pulang.</p><button @click="goToLogin">Masuk anggota</button></div>
+      <div class="section-shell landing-footer__bottom"><span>© 2026 MMD FILKOM 33</span><p>Dibuat dengan rindu, di antara ombak dan jalan pulang.</p><button @click="goToLogin">Tulis kesan dan pesan</button></div>
     </footer>
 
     <MobileBottomNav />

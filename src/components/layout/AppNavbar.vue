@@ -6,6 +6,7 @@ import AppButton from '@/components/ui/AppButton.vue'
 const emit = defineEmits<{ login: [] }>()
 const open = ref(false)
 const scrolled = ref(false)
+const activeSection = ref('#beranda')
 
 const links = [
   { label: 'Beranda', href: '#beranda' },
@@ -17,6 +18,16 @@ const links = [
 
 function updateNav() {
   scrolled.value = window.scrollY > 56
+
+  const readingLine = window.scrollY + Math.min(window.innerHeight * 0.34, 310)
+  let current = links[0]?.href ?? '#beranda'
+
+  links.forEach((link) => {
+    const section = document.querySelector<HTMLElement>(link.href)
+    if (section && section.offsetTop <= readingLine) current = link.href
+  })
+
+  activeSection.value = current
 }
 
 function openLogin() {
@@ -40,7 +51,13 @@ onUnmounted(() => window.removeEventListener('scroll', updateNav))
     </a>
 
     <nav class="navbar__links" aria-label="Navigasi utama">
-      <a v-for="link in links" :key="link.href" :href="link.href">{{ link.label }}</a>
+      <a
+        v-for="link in links"
+        :key="link.href"
+        :href="link.href"
+        :class="{ 'is-active': activeSection === link.href }"
+        :aria-current="activeSection === link.href ? 'location' : undefined"
+      >{{ link.label }}</a>
     </nav>
 
     <AppButton class="navbar__cta" variant="secondary" @click="openLogin">
@@ -53,10 +70,24 @@ onUnmounted(() => window.removeEventListener('scroll', updateNav))
 
     <Transition name="menu">
       <nav v-if="open" class="navbar__mobile" aria-label="Navigasi seluler">
-        <a v-for="link in links" :key="link.href" :href="link.href" @click="open = false">{{ link.label }}</a>
-        <button @click="openLogin"><LogIn :size="17" /> Masuk ke ruang anggota</button>
+        <a
+          v-for="link in links"
+          :key="link.href"
+          :href="link.href"
+          :class="{ 'is-active': activeSection === link.href }"
+          :aria-current="activeSection === link.href ? 'location' : undefined"
+          @click="open = false"
+        >{{ link.label }}</a>
+        <button @click="openLogin"><LogIn :size="17" /> Masuk</button>
       </nav>
     </Transition>
   </header>
 </template>
 
+<style scoped>
+.navbar__links a:first-child:not(.is-active) { color: rgba(255,255,255,.74); }
+.navbar__links a:first-child:not(.is-active)::after { opacity: 0; transform: translateX(-50%) scale(0); }
+.navbar__links a.is-active { color: white; }
+.navbar__links a.is-active::after { content: ''; position: absolute; left: 50%; bottom: -15px; width: 5px; height: 5px; border-radius: 50%; opacity: 1; background: var(--sunset); transform: translateX(-50%) scale(1); transition: opacity .25s ease, transform .25s ease; }
+.navbar__mobile a.is-active { color: white; border-radius: 10px; background: rgba(80,184,185,.14); }
+</style>

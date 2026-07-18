@@ -1,5 +1,5 @@
 import { computed, reactive } from 'vue'
-import type { AdminActivityStatus, AdminMemberStatus, AdminOverview, AdminPeriod, AdminState, MemberDirectory, MemberDirectorySecurity, MemberDirectoryStatus, MessageCompletionOverview, MonitoringSort } from '@/types/admin'
+import type { AdminActivityStatus, AdminMemberStatus, AdminMessagesResetResult, AdminOverview, AdminPeriod, AdminState, MemberDirectory, MemberDirectorySecurity, MemberDirectoryStatus, MessageCompletionOverview, MonitoringSort } from '@/types/admin'
 
 const state = reactive<AdminState>({
   user: null,
@@ -21,6 +21,8 @@ const state = reactive<AdminState>({
   messageProgress: null,
   progressLoading: false,
   progressError: '',
+  messageResetting: false,
+  messageResetError: '',
   monitoringSort: 'progress-desc',
   memberDirectory: null,
   directoryLoading: false,
@@ -188,6 +190,31 @@ async function updateMessageAccess(unlocked: boolean) {
   }
 }
 
+async function scheduleMessageAccess(releaseAt: string) {
+  state.accessUpdating = true
+  state.accessError = ''
+  try {
+    const response = await fetch('/api/admin/message-access/schedule', {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        releaseAt,
+        confirmation: 'JADWALKAN PEMBUKAAN',
+      }),
+    })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.message || 'Jadwal pembukaan belum dapat disimpan.')
+    state.messageAccess = payload.access
+    return payload
+  } catch (cause) {
+    state.accessError = cause instanceof Error ? cause.message : 'Jadwal pembukaan belum dapat disimpan.'
+    throw cause
+  } finally {
+    state.accessUpdating = false
+  }
+}
+
 async function loadMessageProgress() {
   state.progressLoading = true
   state.progressError = ''
@@ -225,6 +252,37 @@ async function initializeMessageProgress() {
     state.error = cause instanceof Error ? cause.message : 'Monitoring pesan belum dapat dibuka.'
   } finally {
     state.loading = false
+  }
+}
+
+async function resetAllMessages() {
+  state.messageResetting = true
+  state.messageResetError = ''
+
+  try {
+    const response = await fetch('/api/admin/messages/reset', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmation: 'HAPUS SEMUA PESAN' }),
+    })
+    const payload = await response.json().catch(() => ({})) as Partial<AdminMessagesResetResult> & { message?: string }
+    if (!response.ok) throw new Error(payload.message || 'Semua pesan belum dapat dikosongkan.')
+    if (!payload.ok || !payload.deleted) throw new Error('Respons reset pesan dari server tidak lengkap.')
+
+    await Promise.all([
+      loadMessageProgress(),
+      state.overview ? loadOverview(true) : Promise.resolve(),
+      state.memberDirectory ? loadMemberDirectory() : Promise.resolve(),
+      state.messageAccess ? loadMessageAccess() : Promise.resolve(),
+    ])
+
+    return payload as AdminMessagesResetResult
+  } catch (cause) {
+    state.messageResetError = cause instanceof Error ? cause.message : 'Semua pesan belum dapat dikosongkan.'
+    throw cause
+  } finally {
+    state.messageResetting = false
   }
 }
 
@@ -361,6 +419,8 @@ function reset() {
   state.messageProgress = null
   state.progressLoading = false
   state.progressError = ''
+  state.messageResetting = false
+  state.messageResetError = ''
   state.monitoringSort = 'progress-desc'
   state.memberDirectory = null
   state.directoryLoading = false
@@ -385,8 +445,10 @@ export function useAdminStore() {
     initializeMessageAccess,
     loadMessageAccess,
     updateMessageAccess,
+    scheduleMessageAccess,
     initializeMessageProgress,
     loadMessageProgress,
+    resetAllMessages,
     setMonitoringPeriod,
     setMonitoringSort,
     initializeMemberDirectory,

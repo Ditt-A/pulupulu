@@ -3,7 +3,6 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { ArrowRight, CalendarDays, ChevronRight, Heart, Image, LockKeyhole, MailOpen, MapPin, Sparkles, Waves } from '@lucide/vue'
 import DashboardBottomNav from '@/components/dashboard/DashboardBottomNav.vue'
 import DashboardMemoryCard from '@/components/dashboard/DashboardMemoryCard.vue'
-import DashboardNoteCard from '@/components/dashboard/DashboardNoteCard.vue'
 import DashboardSidebar from '@/components/dashboard/DashboardSidebar.vue'
 import DashboardTopbar from '@/components/dashboard/DashboardTopbar.vue'
 import { members } from '@/data/members'
@@ -29,13 +28,8 @@ const greeting = computed(() => {
   return 'Selamat malam'
 })
 
-const notes = [
-  { from: members[1]!, message: 'Terima kasih sudah menjadi orang yang selalu bisa diandalkan, bahkan ketika semuanya terasa terlalu ramai.' },
-  { from: members[7]!, message: 'Semoga nanti kita masih bisa tertawa pada lelucon yang sama, meski tidak lagi tinggal dalam satu atap.' },
-]
-
 const memories = [
-  { image: '/images/kkn-group-hero.png', title: 'Tiga belas orang, satu rumah', date: '12 Juli 2026', location: 'Pantai Pesisir Harapan', caption: 'Hari pertama sebelum semua nama terasa begitu akrab.', shape: 'landscape' as const },
+  { image: '/images/kkn-group-hero.png', title: 'Tiga belas orang, satu rumah', date: '12 Juli 2026', location: 'Desa Sumbersih', caption: 'Hari pertama sebelum semua nama terasa begitu akrab.', shape: 'landscape' as const },
   { image: 'https://images.unsplash.com/photo-1529156069898-49953e39b3ac?auto=format&fit=crop&w=1000&q=88', title: 'Sore tanpa agenda', date: '16 Juli 2026', location: 'Teras Posko', caption: 'Cerita yang dimulai setelah semua pekerjaan selesai.', shape: 'portrait' as const },
   { image: '/images/kkn-coast-sunset.png', title: 'Senja terakhir', date: '8 Agustus 2026', location: 'Garis Pantai', caption: 'Laut yang sama, arah pulang yang berbeda.', shape: 'square' as const },
 ]
@@ -136,17 +130,12 @@ onMounted(loadSession)
 
         <section id="dash-surat" class="dash-section">
           <header class="dash-section__head"><div><p>Hanya untukmu</p><h2>Surat yang menunggumu.</h2></div><button @click="writeMessage">Tulis pesan pribadi <ChevronRight :size="16" /></button></header>
-          <div class="dash-letter-layout">
-            <div class="dash-notes">
-              <DashboardNoteCard v-for="(note, index) in notes" :key="note.from.id" :from="note.from.name" :role="note.from.role" :portrait="note.from.portrait" :message="note.message" :unread="index === 0" />
-            </div>
-            <article class="dash-letter-teaser">
-              <div class="dash-letter-teaser__envelope"><span><MailOpen :size="25" /></span><i /><b /></div>
-              <p>Satu surat masih tersegel</p>
-              <h3>Ada sesuatu yang belum sempat dikatakan.</h3>
-              <button>Buka perlahan <ArrowRight :size="16" /></button>
-            </article>
-          </div>
+          <article class="dash-letter-teaser">
+            <div class="dash-letter-teaser__envelope"><span><MailOpen :size="25" /></span><i /><b /></div>
+            <p>Satu surat masih tersegel</p>
+            <h3>Ada sesuatu yang belum sempat dikatakan.</h3>
+            <button @click="navigate('surat')">Buka perlahan <ArrowRight :size="16" /></button>
+          </article>
         </section>
 
         <section id="dash-album" class="dash-section">
@@ -159,7 +148,7 @@ onMounted(loadSession)
         <section class="dash-day-card">
           <div class="dash-day-card__number"><span>Hari</span><strong>30</strong></div>
           <div class="dash-day-card__copy"><p>8 Agustus 2026 · Hari Perpisahan</p><h2>Hari ketika “sampai besok”<br /><em>tidak lagi bisa diucapkan.</em></h2><blockquote>Pelukan, lambaian, dan satu tatapan terakhir ke laut. Kami pulang membawa sesuatu yang tidak pernah muat di dalam koper.</blockquote><button>Baca cerita lengkap <ArrowRight :size="16" /></button></div>
-          <figure><img src="/images/kkn-coast-sunset.png" alt="Senja terakhir di garis pantai" /><figcaption><MapPin :size="12" /> Garis Pantai Pesisir Harapan</figcaption></figure>
+          <figure><img src="/images/kkn-coast-sunset.png" alt="Senja terakhir di garis pantai" /><figcaption><MapPin :size="12" /> Desa Sumbersih</figcaption></figure>
         </section>
 
         <section id="dash-lingkaran" class="dash-section dash-circle">

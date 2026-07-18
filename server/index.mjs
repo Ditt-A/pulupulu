@@ -8,6 +8,7 @@ import { createSchema, databasePath, hashPassword, openDatabase, verifyPassword 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url))
 const distRoot = join(projectRoot, 'dist')
 const port = Number(process.env.PORT || 8787)
+const host = process.env.HOST || '127.0.0.1'
 const database = openDatabase()
 createSchema(database)
 
@@ -195,6 +196,15 @@ const adminDailyMessages = database.prepare(`
   GROUP BY substr(sent_at, 1, 10)
   ORDER BY day ASC
 `)
+const adminMessageResetImpact = database.prepare(`
+  SELECT COUNT(*) AS total_messages,
+         SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft_messages,
+         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent_messages,
+         SUM(CASE WHEN status = 'sent' AND read_at IS NOT NULL THEN 1 ELSE 0 END) AS read_messages,
+         SUM(CASE WHEN status = 'sent' AND read_at IS NULL THEN 1 ELSE 0 END) AS unread_messages
+  FROM private_messages
+`)
+const deleteAllPrivateMessages = database.prepare('DELETE FROM private_messages')
 const findGlobalMessageAccess = database.prepare(`
   SELECT settings.setting_value, settings.updated_at,
          updater.display_name AS updated_by_name
@@ -207,6 +217,18 @@ const updateGlobalMessageAccess = database.prepare(`
   UPDATE app_settings
   SET setting_value = ?, updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
   WHERE setting_key = 'global_message_access'
+  RETURNING setting_value, updated_at
+`)
+const findGlobalMessageReleaseAt = database.prepare(`
+  SELECT setting_value, updated_at
+  FROM app_settings
+  WHERE setting_key = 'global_message_release_at'
+  LIMIT 1
+`)
+const updateGlobalMessageReleaseAt = database.prepare(`
+  UPDATE app_settings
+  SET setting_value = ?, updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE setting_key = 'global_message_release_at'
   RETURNING setting_value, updated_at
 `)
 const globalMessageAccessImpact = database.prepare(`
@@ -290,10 +312,26 @@ const updateManagedMemberStatus = database.prepare(`
 `)
 database.exec('DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP')
 
-const inboxReleaseAt = '2026-08-08T19:00:00+07:00'
+const defaultInboxReleaseAt = '2026-08-08T19:00:00+07:00'
+
+function inboxAccessState() {
+  const setting = findGlobalMessageAccess.get()
+  const mode = ['locked', 'unlocked', 'scheduled'].includes(setting?.setting_value)
+    ? setting.setting_value
+    : 'locked'
+  const releaseAt = findGlobalMessageReleaseAt.get()?.setting_value || defaultInboxReleaseAt
+  const releaseTime = Date.parse(releaseAt)
+  const scheduleReached = Number.isFinite(releaseTime) && Date.now() >= releaseTime
+  const overrideUnlocked = process.env.INBOX_UNLOCK_OVERRIDE === '1'
+  return {
+    mode,
+    releaseAt,
+    unlocked: overrideUnlocked || mode === 'unlocked' || (mode === 'scheduled' && scheduleReached),
+  }
+}
 
 function inboxAccessUnlocked() {
-  return process.env.INBOX_UNLOCK_OVERRIDE === '1' || findGlobalMessageAccess.get()?.setting_value === 'unlocked'
+  return inboxAccessState().unlocked
 }
 
 const mimeTypes = {
@@ -691,16 +729,62 @@ async function changeManagedMemberStatus(request, response, memberId) {
   }
 }
 
+async function resetAllPrivateMessages(request, response) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+
+  try {
+    const payload = await readJson(request)
+    if (payload.confirmation !== 'HAPUS SEMUA PESAN') {
+      return sendJson(response, 422, { ok: false, message: 'Konfirmasi penghapusan semua pesan tidak sesuai.' })
+    }
+
+    database.exec('BEGIN IMMEDIATE')
+    let deleted
+    try {
+      const impact = adminMessageResetImpact.get()
+      const result = deleteAllPrivateMessages.run()
+      deleted = {
+        total: Number(result.changes),
+        drafts: Number(impact.total_messages ? impact.draft_messages : 0),
+        sent: Number(impact.total_messages ? impact.sent_messages : 0),
+        read: Number(impact.total_messages ? impact.read_messages : 0),
+        unread: Number(impact.total_messages ? impact.unread_messages : 0),
+      }
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+
+    return sendJson(response, 200, {
+      ok: true,
+      changed: deleted.total > 0,
+      message: deleted.total > 0
+        ? 'Semua pesan dan draf pengujian berhasil dihapus.'
+        : 'Penyimpanan pesan sudah kosong.',
+      deleted,
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Semua pesan belum dapat dihapus.' })
+  }
+}
+
 function serializeGlobalMessageAccess() {
   const setting = findGlobalMessageAccess.get()
   const impact = globalMessageAccessImpact.get()
-  const unlocked = setting?.setting_value === 'unlocked'
+  const accessState = inboxAccessState()
   return {
-    unlocked,
-    status: unlocked ? 'unlocked' : 'locked',
+    unlocked: accessState.unlocked,
+    status: accessState.unlocked ? 'unlocked' : 'locked',
+    mode: accessState.mode,
+    scheduled: accessState.mode === 'scheduled',
     updatedAt: setting?.updated_at || null,
     updatedBy: setting?.updated_by_name || 'Database seeder',
-    plannedReleaseAt: inboxReleaseAt,
+    plannedReleaseAt: accessState.releaseAt,
     impact: {
       sentMessages: Number(impact.sent_messages || 0),
       unreadMessages: Number(impact.unread_messages || 0),
@@ -731,14 +815,15 @@ async function changeGlobalMessageAccess(request, response) {
       return sendJson(response, 422, { ok: false, message: 'Konfirmasi perubahan akses tidak sesuai.' })
     }
 
-    const current = findGlobalMessageAccess.get()?.setting_value === 'unlocked'
-    if (current !== payload.unlocked) {
-      updateGlobalMessageAccess.get(payload.unlocked ? 'unlocked' : 'locked', admin.id)
+    const nextMode = payload.unlocked ? 'unlocked' : 'locked'
+    const currentMode = findGlobalMessageAccess.get()?.setting_value || 'locked'
+    if (currentMode !== nextMode) {
+      updateGlobalMessageAccess.get(nextMode, admin.id)
     }
 
     return sendJson(response, 200, {
       ok: true,
-      changed: current !== payload.unlocked,
+      changed: currentMode !== nextMode,
       message: payload.unlocked ? 'Akses seluruh surat berhasil dibuka.' : 'Akses seluruh surat berhasil dikunci.',
       access: serializeGlobalMessageAccess(),
     })
@@ -747,6 +832,52 @@ async function changeGlobalMessageAccess(request, response) {
     if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
     console.error(error)
     return sendJson(response, 500, { ok: false, message: 'Status akses belum dapat diperbarui.' })
+  }
+}
+
+async function scheduleGlobalMessageAccess(request, response) {
+  const admin = requireAdmin(request, response)
+  if (!admin) return
+
+  try {
+    const payload = await readJson(request)
+    if (typeof payload.releaseAt !== 'string' || !payload.releaseAt.trim()) {
+      return sendJson(response, 422, { ok: false, message: 'Tanggal dan waktu pembukaan wajib diisi.' })
+    }
+    if (payload.confirmation !== 'JADWALKAN PEMBUKAAN') {
+      return sendJson(response, 422, { ok: false, message: 'Konfirmasi jadwal pembukaan tidak sesuai.' })
+    }
+
+    const releaseTime = Date.parse(payload.releaseAt)
+    if (!Number.isFinite(releaseTime)) {
+      return sendJson(response, 422, { ok: false, message: 'Tanggal dan waktu pembukaan tidak valid.' })
+    }
+    if (releaseTime <= Date.now() + 60_000) {
+      return sendJson(response, 422, { ok: false, message: 'Waktu pembukaan harus setidaknya satu menit dari sekarang.' })
+    }
+
+    const normalizedReleaseAt = new Date(releaseTime).toISOString()
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      updateGlobalMessageReleaseAt.get(normalizedReleaseAt, admin.id)
+      updateGlobalMessageAccess.get('scheduled', admin.id)
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+
+    return sendJson(response, 200, {
+      ok: true,
+      changed: true,
+      message: 'Jadwal pembukaan berhasil disimpan. Inbox akan terbuka otomatis pada waktunya.',
+      access: serializeGlobalMessageAccess(),
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Jadwal pembukaan belum dapat disimpan.' })
   }
 }
 
@@ -975,12 +1106,12 @@ function getPrivateInbox(request, response) {
   if (!recipient) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
   if (!recipient.member_id) return sendJson(response, 403, { ok: false, message: 'Inbox privat hanya tersedia untuk akun anggota.' })
 
-  const accessUnlocked = inboxAccessUnlocked()
+  const accessState = inboxAccessState()
   const messages = listInboxMessages.all(recipient.id).map((message) => ({
     id: message.id,
     sentAt: message.sent_at,
-    unlockAt: message.unlock_at,
-    locked: !accessUnlocked,
+    unlockAt: accessState.releaseAt,
+    locked: !accessState.unlocked,
     sender: {
       memberId: message.sender_member_id,
       name: message.sender_name,
@@ -990,8 +1121,8 @@ function getPrivateInbox(request, response) {
 
   return sendJson(response, 200, {
     ok: true,
-    releaseAt: inboxReleaseAt,
-    accessUnlocked,
+    releaseAt: accessState.releaseAt,
+    accessUnlocked: accessState.unlocked,
     messages,
   })
 }
@@ -1006,8 +1137,9 @@ function requireOpenInbox(request, response) {
     sendJson(response, 403, { ok: false, message: 'Inbox privat hanya tersedia untuk akun anggota.' })
     return null
   }
-  if (!inboxAccessUnlocked()) {
-    sendJson(response, 423, { ok: false, message: 'Surat masih tersegel sampai malam perpisahan.', releaseAt: inboxReleaseAt })
+  const accessState = inboxAccessState()
+  if (!accessState.unlocked) {
+    sendJson(response, 423, { ok: false, message: 'Surat masih tersegel sampai waktu pembukaan yang ditentukan.', releaseAt: accessState.releaseAt })
     return null
   }
   return recipient
@@ -1016,6 +1148,7 @@ function requireOpenInbox(request, response) {
 function getOpenPrivateInbox(request, response) {
   const recipient = requireOpenInbox(request, response)
   if (!recipient) return
+  const releaseAt = inboxAccessState().releaseAt
 
   const messages = listOpenInboxMessages.all(recipient.id).map((message) => ({
     id: message.id,
@@ -1023,7 +1156,7 @@ function getOpenPrivateInbox(request, response) {
     body: message.body,
     closing: message.closing,
     sentAt: message.sent_at,
-    unlockAt: message.unlock_at,
+    unlockAt: releaseAt,
     readAt: message.read_at,
     isRead: Boolean(message.read_at),
     sender: {
@@ -1033,7 +1166,7 @@ function getOpenPrivateInbox(request, response) {
     },
   }))
 
-  return sendJson(response, 200, { ok: true, releaseAt: inboxReleaseAt, messages })
+  return sendJson(response, 200, { ok: true, releaseAt, messages })
 }
 
 function serializeOpenMessage(message) {
@@ -1043,7 +1176,7 @@ function serializeOpenMessage(message) {
     body: message.body,
     closing: message.closing,
     sentAt: message.sent_at,
-    unlockAt: message.unlock_at,
+    unlockAt: inboxAccessState().releaseAt,
     readAt: message.read_at,
     isRead: Boolean(message.read_at),
     sender: {
@@ -1138,6 +1271,9 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && request.url?.startsWith('/api/admin/members')) {
     return getManagedMembers(request, response)
   }
+  if (request.method === 'POST' && request.url?.match(/^\/api\/admin\/messages\/reset(?:\?.*)?$/)) {
+    return resetAllPrivateMessages(request, response)
+  }
   const resetMemberPasswordMatch = request.url?.match(/^\/api\/admin\/members\/(\d+)\/reset-password(?:\?.*)?$/)
   if (request.method === 'POST' && resetMemberPasswordMatch) {
     return resetMemberPassword(request, response, Number(resetMemberPasswordMatch[1]))
@@ -1145,6 +1281,9 @@ const server = createServer(async (request, response) => {
   const memberStatusMatch = request.url?.match(/^\/api\/admin\/members\/(\d+)\/status(?:\?.*)?$/)
   if (request.method === 'PATCH' && memberStatusMatch) {
     return changeManagedMemberStatus(request, response, Number(memberStatusMatch[1]))
+  }
+  if (request.method === 'PATCH' && request.url?.startsWith('/api/admin/message-access/schedule')) {
+    return scheduleGlobalMessageAccess(request, response)
   }
   if (request.method === 'PATCH' && request.url?.startsWith('/api/admin/message-access')) {
     return changeGlobalMessageAccess(request, response)
@@ -1182,8 +1321,8 @@ const server = createServer(async (request, response) => {
   return sendJson(response, 405, { ok: false, message: 'Metode tidak diizinkan.' })
 })
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`Pulupulu server ready at http://127.0.0.1:${port}`)
+server.listen(port, host, () => {
+  console.log(`Pulupulu server ready at http://${host}:${port}`)
 })
 
 function shutdown() {

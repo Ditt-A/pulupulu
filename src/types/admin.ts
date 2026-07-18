@@ -58,6 +58,8 @@ export interface AdminOverview {
 export interface GlobalMessageAccess {
   unlocked: boolean
   status: 'locked' | 'unlocked'
+  mode: 'locked' | 'unlocked' | 'scheduled'
+  scheduled: boolean
   updatedAt: string | null
   updatedBy: string
   plannedReleaseAt: string
@@ -106,6 +108,18 @@ export interface MessageCompletionOverview {
   timeline: Array<{ day: string; messages: number; completedPairs: number }>
 }
 
+export interface AdminMessagesResetResult {
+  ok: true
+  message: string
+  deleted: {
+    total: number
+    drafts: number
+    sent: number
+    read: number
+    unread: number
+  }
+}
+
 export type MemberDirectoryStatus = 'all' | 'active' | 'inactive'
 export type MemberDirectorySecurity = 'all' | 'initial' | 'secured'
 
@@ -150,6 +164,8 @@ export interface AdminState {
   messageProgress: MessageCompletionOverview | null
   progressLoading: boolean
   progressError: string
+  messageResetting: boolean
+  messageResetError: string
   monitoringSort: MonitoringSort
   memberDirectory: MemberDirectory | null
   directoryLoading: boolean
