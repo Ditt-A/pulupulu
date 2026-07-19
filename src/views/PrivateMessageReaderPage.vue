@@ -5,11 +5,12 @@ import AnimatedPrivateEnvelope from '@/components/messages/AnimatedPrivateEnvelo
 import FocusedPrivateLetter from '@/components/messages/FocusedPrivateLetter.vue'
 import { members } from '@/data/members'
 import type { AuthUser } from '@/types/auth'
-import type { OpenInboxMessage } from '@/types/messages'
+import type { OpenInboxMessage, OpenInboxSummary } from '@/types/messages'
 
 const props = defineProps<{ messageId: number }>()
 const user = ref<AuthUser | null>(null)
-const message = ref<OpenInboxMessage | null>(null)
+const message = ref<OpenInboxSummary | null>(null)
+const openedMessage = ref<OpenInboxMessage | null>(null)
 const loading = ref(true)
 const error = ref('')
 const opening = ref(false)
@@ -44,36 +45,28 @@ async function loadMessage() {
   }
 }
 
-function openLetter() {
+async function openLetter() {
   if (!message.value || opening.value || opened.value) return
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  if (reducedMotion) {
-    opened.value = true
-    void markRead()
-    return
-  }
-
   opening.value = true
-  openTimer = window.setTimeout(() => {
+  try {
+    const animation = new Promise<void>((resolve) => {
+      openTimer = window.setTimeout(resolve, reducedMotion ? 0 : 1050)
+    })
+    const request = fetch(`/api/messages/${message.value.id}/open`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    const [response] = await Promise.all([request, animation])
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.message || 'Surat belum dapat dibuka.')
+
+    openedMessage.value = payload.message as OpenInboxMessage
     opened.value = true
     opening.value = false
-    void markRead()
-  }, 1050)
-}
-
-async function markRead() {
-  if (!message.value || message.value.isRead) return
-  message.value.isRead = true
-  message.value.readAt = new Date().toISOString()
-  try {
-    const response = await fetch(`/api/messages/${message.value.id}/read`, { method: 'PATCH', credentials: 'same-origin' })
-    const payload = await response.json()
-    if (!response.ok) throw new Error(payload.message || 'Status baca belum dapat disimpan.')
-    message.value.readAt = payload.message.readAt
   } catch (cause) {
-    message.value.isRead = false
-    message.value.readAt = null
-    showFeedback(cause instanceof Error ? cause.message : 'Status baca belum tersimpan.')
+    opening.value = false
+    showFeedback(cause instanceof Error ? cause.message : 'Surat belum dapat dibuka.')
   }
 }
 
@@ -88,8 +81,9 @@ function backToInbox() {
 }
 
 function reply() {
-  if (!message.value) return
-  window.sessionStorage.setItem('kkn-message-recipient', String(message.value.sender.memberId))
+  const currentMessage = openedMessage.value || message.value
+  if (!currentMessage) return
+  window.sessionStorage.setItem('kkn-message-recipient', String(currentMessage.sender.memberId))
   window.location.assign('/dashboard/pesan/tulis')
 }
 
@@ -146,12 +140,12 @@ onBeforeUnmount(() => {
     <div class="focus-reader-stage">
       <Transition name="private-reader-stage" mode="out-in">
         <AnimatedPrivateEnvelope v-if="!opened" key="envelope" :message="message" :opening="opening" @open="openLetter" />
-        <FocusedPrivateLetter v-else key="letter" :message="message" :recipient-name="user.name" @back="backToInbox" @reply="reply" />
+        <FocusedPrivateLetter v-else-if="openedMessage" key="letter" :message="openedMessage" :recipient-name="user.name" @back="backToInbox" @reply="reply" />
       </Transition>
     </div>
 
     <footer class="focus-reader-footer"><span><LockKeyhole :size="12" /> Surat ini hanya ditampilkan untuk akunmu.</span><small>Tekan Esc untuk kembali</small></footer>
 
-    <Transition name="open-inbox-toast"><div v-if="feedback" class="focus-reader-feedback" role="status"><span><Check :size="16" /></span><p><strong>Status baca belum tersimpan</strong>{{ feedback }}</p></div></Transition>
+    <Transition name="open-inbox-toast"><div v-if="feedback" class="focus-reader-feedback" role="status"><span><Check :size="16" /></span><p><strong>Surat belum terbuka</strong>{{ feedback }}</p></div></Transition>
   </main>
 </template>

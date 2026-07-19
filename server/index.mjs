@@ -92,6 +92,17 @@ const statements = {
   WHERE member_id = $1 AND account_type = 'member' AND is_active = TRUE
   LIMIT 1
 `,
+  listRecipientMessageStatuses: `
+  SELECT recipient.member_id AS recipient_member_id,
+         BOOL_OR(pm.status = 'draft') AS has_draft,
+         BOOL_OR(pm.status = 'sent') AS has_sent
+  FROM private_messages pm
+  JOIN users recipient ON recipient.id = pm.recipient_user_id
+  WHERE pm.sender_user_id = $1
+    AND recipient.account_type = 'member'
+    AND recipient.is_active = TRUE
+  GROUP BY recipient.member_id
+`,
   findDraft: `
   SELECT id, title, body, closing, status, updated_at
   FROM private_messages
@@ -139,7 +150,7 @@ const statements = {
   ORDER BY pm.sent_at DESC, pm.id DESC
 `,
   listOpenInboxMessages: `
-  SELECT pm.id, pm.title, pm.body, pm.closing, pm.sent_at, pm.unlock_at,
+  SELECT pm.id, pm.sent_at, pm.unlock_at,
          pm.read_at, sender.member_id AS sender_member_id,
          sender.display_name AS sender_name,
          sender.division_role AS sender_role
@@ -163,11 +174,6 @@ const statements = {
   SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
   WHERE id = $1 AND recipient_user_id = $2 AND status = 'sent'
   RETURNING id, read_at
-`,
-  markAllInboxMessagesRead: `
-  UPDATE private_messages
-  SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
-  WHERE recipient_user_id = $1 AND status = 'sent' AND read_at IS NULL
 `,
   adminMemberSummary: `
   SELECT COUNT(*) AS total_members,
@@ -1051,6 +1057,19 @@ function serializeDraft(row, recipientMemberId) {
   }
 }
 
+async function getMessageRecipientStatuses(request, response) {
+  const sender = await authenticatedUser(request)
+  if (!sender) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
+  if (!sender.member_id) return sendJson(response, 403, { ok: false, message: 'Daftar penerima hanya tersedia untuk akun anggota.' })
+
+  const rows = await queryRows(statements.listRecipientMessageStatuses, [sender.id])
+  const recipients = rows.map((row) => ({
+    memberId: row.recipient_member_id,
+    status: row.has_draft ? 'draft' : row.has_sent ? 'sent' : 'available',
+  }))
+  return sendJson(response, 200, { ok: true, recipients })
+}
+
 async function getMessageDraft(request, response) {
   const url = new URL(request.url || '/', 'http://localhost')
   const recipientMemberId = Number(url.searchParams.get('recipientMemberId'))
@@ -1215,9 +1234,6 @@ async function getOpenPrivateInbox(request, response) {
   const inboxRows = await queryRows(statements.listOpenInboxMessages, [recipient.id])
   const messages = inboxRows.map((message) => ({
     id: normalizeId(message.id),
-    title: message.title,
-    body: message.body,
-    closing: message.closing,
     sentAt: message.sent_at,
     unlockAt: releaseAt,
     readAt: message.read_at,
@@ -1258,28 +1274,40 @@ async function getOpenPrivateMessage(request, response, messageId) {
 
   const message = await queryOne(statements.findOpenInboxMessage, [messageId, recipient.id])
   if (!message) return sendJson(response, 404, { ok: false, message: 'Surat tidak ditemukan di inbox-mu.' })
-  return sendJson(response, 200, { ok: true, message: serializeOpenMessage(message, accessState.releaseAt) })
-}
-
-async function markPrivateMessageRead(request, response, messageId) {
-  const context = await requireOpenInbox(request, response)
-  if (!context) return
-  const { recipient } = context
-  if (!Number.isInteger(messageId)) return sendJson(response, 400, { ok: false, message: 'Surat tidak valid.' })
-
-  const message = await queryOne(statements.markInboxMessageRead, [messageId, recipient.id])
-  if (!message) return sendJson(response, 404, { ok: false, message: 'Surat tidak ditemukan di inbox-mu.' })
   return sendJson(response, 200, {
     ok: true,
-    message: { id: normalizeId(message.id), readAt: message.read_at, isRead: true },
+    message: {
+      id: normalizeId(message.id),
+      sentAt: message.sent_at,
+      unlockAt: accessState.releaseAt,
+      readAt: message.read_at,
+      isRead: Boolean(message.read_at),
+      sender: {
+        memberId: message.sender_member_id,
+        name: message.sender_name,
+        role: message.sender_role,
+      },
+    },
   })
 }
 
-async function markAllPrivateMessagesRead(request, response) {
+async function openPrivateMessage(request, response, messageId) {
   const context = await requireOpenInbox(request, response)
   if (!context) return
-  const updated = await executeStatement(statements.markAllInboxMessagesRead, [context.recipient.id])
-  return sendJson(response, 200, { ok: true, updated })
+  const { recipient, accessState } = context
+  if (!Number.isInteger(messageId)) return sendJson(response, 400, { ok: false, message: 'Surat tidak valid.' })
+
+  const message = await withTransaction(async (client) => {
+    const found = await queryOne(statements.findOpenInboxMessage, [messageId, recipient.id], client)
+    if (!found) return null
+    const read = await queryOne(statements.markInboxMessageRead, [messageId, recipient.id], client)
+    return { ...found, read_at: read.read_at }
+  })
+  if (!message) return sendJson(response, 404, { ok: false, message: 'Surat tidak ditemukan di inbox-mu.' })
+  return sendJson(response, 200, {
+    ok: true,
+    message: serializeOpenMessage(message, accessState.releaseAt),
+  })
 }
 
 async function logout(request, response) {
@@ -1367,6 +1395,9 @@ export async function handleRequest(request, response) {
     if (request.method === 'PATCH' && pathname === '/api/admin/message-access') {
       return await changeGlobalMessageAccess(request, response)
     }
+    if (request.method === 'GET' && pathname === '/api/messages/recipients') {
+      return await getMessageRecipientStatuses(request, response)
+    }
     if (request.method === 'GET' && pathname === '/api/messages/draft') {
       return await getMessageDraft(request, response)
     }
@@ -1382,18 +1413,14 @@ export async function handleRequest(request, response) {
     if (request.method === 'GET' && pathname === '/api/messages/open-inbox') {
       return await getOpenPrivateInbox(request, response)
     }
-    if (request.method === 'PATCH' && pathname === '/api/messages/read-all') {
-      return await markAllPrivateMessagesRead(request, response)
-    }
-
     const openMessageMatch = pathname.match(/^\/api\/messages\/(\d+)$/)
     if (request.method === 'GET' && openMessageMatch) {
       return await getOpenPrivateMessage(request, response, Number(openMessageMatch[1]))
     }
 
-    const readMessageMatch = pathname.match(/^\/api\/messages\/(\d+)\/read$/)
-    if (request.method === 'PATCH' && readMessageMatch) {
-      return await markPrivateMessageRead(request, response, Number(readMessageMatch[1]))
+    const revealMessageMatch = pathname.match(/^\/api\/messages\/(\d+)\/open$/)
+    if (request.method === 'POST' && revealMessageMatch) {
+      return await openPrivateMessage(request, response, Number(revealMessageMatch[1]))
     }
     if (request.method === 'GET' && pathname === '/api/health') {
       await queryOne('SELECT 1 AS ok')

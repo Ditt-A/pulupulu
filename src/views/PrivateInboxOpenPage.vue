@@ -1,37 +1,30 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ArrowLeft, ArrowRight, CheckCheck, MailOpen, MailPlus, SearchX, Sparkles, Waves } from '@lucide/vue'
+import { computed, onMounted, ref } from 'vue'
+import { ArrowLeft, ArrowRight, MailOpen, MailPlus, SearchX, Sparkles, Waves } from '@lucide/vue'
 import DashboardBottomNav from '@/components/dashboard/DashboardBottomNav.vue'
 import DashboardSidebar from '@/components/dashboard/DashboardSidebar.vue'
 import DashboardTopbar from '@/components/dashboard/DashboardTopbar.vue'
-import OpenedPrivateLetter from '@/components/messages/OpenedPrivateLetter.vue'
 import OpenInboxFilters from '@/components/messages/OpenInboxFilters.vue'
 import OpenInboxListItem from '@/components/messages/OpenInboxListItem.vue'
 import { members } from '@/data/members'
 import type { AuthUser } from '@/types/auth'
-import type { InboxReadFilter, InboxSort, OpenInboxMessage } from '@/types/messages'
+import type { InboxReadFilter, InboxSort, OpenInboxSummary } from '@/types/messages'
 
 const user = ref<AuthUser | null>(null)
-const messages = ref<OpenInboxMessage[]>([])
+const messages = ref<OpenInboxSummary[]>([])
 const loading = ref(true)
 const error = ref('')
 const menuOpen = ref(false)
 const search = ref('')
 const filter = ref<InboxReadFilter>('all')
 const sort = ref<InboxSort>('newest')
-const selectedId = ref<number | null>(null)
-const readerOpen = ref(false)
-const feedback = ref('')
-const feedbackTitle = ref('')
-let feedbackTimer = 0
 
 const currentMember = computed(() => members.find((member) => member.id === user.value?.memberId))
 const portrait = computed(() => currentMember.value?.portrait || '/images/kkn-group-hero.png')
 const firstName = computed(() => user.value?.name.split(' ').find((part) => part.replace(/[^A-Za-zÀ-ÿ]/g, '').length > 2) || 'Teman')
 const unreadCount = computed(() => messages.value.filter((message) => !message.isRead).length)
-const selectedMessage = computed(() => messages.value.find((message) => message.id === selectedId.value) || null)
 
-function messageTime(message: OpenInboxMessage) {
+function messageTime(message: OpenInboxSummary) {
   const raw = message.sentAt.includes('T') ? message.sentAt : `${message.sentAt.replace(' ', 'T')}Z`
   return new Date(raw).getTime()
 }
@@ -41,7 +34,7 @@ const filteredMessages = computed(() => {
   return messages.value
     .filter((message) => {
       const readMatch = filter.value === 'all' || (filter.value === 'read' ? message.isRead : !message.isRead)
-      const searchMatch = !term || [message.sender.name, message.sender.role, message.title, message.body, message.closing]
+      const searchMatch = !term || [message.sender.name, message.sender.role]
         .some((value) => value.toLocaleLowerCase('id-ID').includes(term))
       return readMatch && searchMatch
     })
@@ -71,59 +64,7 @@ async function loadInbox() {
   }
 }
 
-async function openMessage(message: OpenInboxMessage) {
-  selectedId.value = message.id
-  readerOpen.value = true
-  if (message.isRead) return
-
-  message.isRead = true
-  message.readAt = new Date().toISOString()
-  try {
-    const response = await fetch(`/api/messages/${message.id}/read`, { method: 'PATCH', credentials: 'same-origin' })
-    const payload = await response.json()
-    if (!response.ok) throw new Error(payload.message || 'Status baca belum dapat disimpan.')
-    message.readAt = payload.message.readAt
-  } catch (cause) {
-    message.isRead = false
-    message.readAt = null
-    showFeedback('Status belum tersimpan', cause instanceof Error ? cause.message : 'Coba buka surat ini lagi.')
-  }
-}
-
-async function markAllRead() {
-  const unread = messages.value.filter((message) => !message.isRead)
-  if (!unread.length) return
-  const markedAt = new Date().toISOString()
-  unread.forEach((message) => { message.isRead = true; message.readAt = markedAt })
-
-  try {
-    const response = await fetch('/api/messages/read-all', { method: 'PATCH', credentials: 'same-origin' })
-    const payload = await response.json()
-    if (!response.ok) throw new Error(payload.message || 'Status surat belum dapat diperbarui.')
-    showFeedback('Semua surat sudah dibaca', `${payload.updated} surat ditandai sebagai sudah dibaca.`)
-  } catch (cause) {
-    unread.forEach((message) => { message.isRead = false; message.readAt = null })
-    showFeedback('Perubahan dibatalkan', cause instanceof Error ? cause.message : 'Silakan coba lagi.')
-  }
-}
-
-function showFeedback(title: string, message: string) {
-  feedbackTitle.value = title
-  feedback.value = message
-  window.clearTimeout(feedbackTimer)
-  feedbackTimer = window.setTimeout(() => { feedback.value = '' }, 3400)
-}
-
-function closeReader() {
-  readerOpen.value = false
-}
-
-function replyTo(message: OpenInboxMessage) {
-  window.sessionStorage.setItem('kkn-message-recipient', String(message.sender.memberId))
-  window.location.assign('/dashboard/pesan/tulis')
-}
-
-function focusMessage(message: OpenInboxMessage) {
+function openMessage(message: OpenInboxSummary) {
   window.location.assign(`/dashboard/surat/${message.id}`)
 }
 
@@ -150,7 +91,6 @@ async function logout() {
 }
 
 onMounted(loadInbox)
-onBeforeUnmount(() => window.clearTimeout(feedbackTimer))
 </script>
 
 <template>
@@ -169,7 +109,7 @@ onBeforeUnmount(() => window.clearTimeout(feedbackTimer))
     <a href="/dashboard/surat">Kembali ke inbox</a>
   </main>
 
-  <div v-else class="dash-shell open-inbox-page" :class="{ 'dash-shell--menu-open': menuOpen, 'open-inbox-page--reader-open': readerOpen }">
+  <div v-else class="dash-shell open-inbox-page" :class="{ 'dash-shell--menu-open': menuOpen }">
     <DashboardSidebar :user="user" :portrait="portrait" active="surat" @navigate="navigate" @logout="logout" />
     <button class="dash-shell__scrim" aria-label="Tutup menu" @click="menuOpen = false" />
 
@@ -190,33 +130,22 @@ onBeforeUnmount(() => window.clearTimeout(feedbackTimer))
         <section class="open-inbox-directory">
           <header class="open-inbox-directory__head"><div><p>Untukmu, akhirnya</p><h2>Surat-surat yang sudah boleh bercerita.</h2></div><button type="button" @click="writeMessage"><MailPlus :size="15" /> Tulis pesan baru</button></header>
 
-          <OpenInboxFilters :search="search" :filter="filter" :sort="sort" :total="messages.length" :unread="unreadCount" @update:search="search = $event" @update:filter="filter = $event" @update:sort="sort = $event" @read-all="markAllRead" />
+          <OpenInboxFilters :search="search" :filter="filter" :sort="sort" :total="messages.length" :unread="unreadCount" @update:search="search = $event" @update:filter="filter = $event" @update:sort="sort = $event" />
 
-          <div v-if="messages.length" class="open-inbox-layout">
-            <div class="open-inbox-list">
-              <OpenInboxListItem v-for="message in filteredMessages" :key="message.id" :message="message" :selected="selectedId === message.id" @select="openMessage" />
+          <div v-if="messages.length" class="open-inbox-list open-inbox-list--sealed">
+              <OpenInboxListItem v-for="message in filteredMessages" :key="message.id" :message="message" @select="openMessage" />
               <div v-if="!filteredMessages.length" class="open-inbox-no-results"><SearchX :size="25" /><strong>Tidak ada surat di hasil ini.</strong><span>Coba kata lain atau pilih filter berbeda.</span><button type="button" @click="search = ''; filter = 'all'">Tampilkan semua</button></div>
-            </div>
-
-            <button v-if="readerOpen" class="open-inbox-reader__scrim" type="button" aria-label="Tutup surat" @click="closeReader" />
-            <div class="open-inbox-reader" :class="{ 'open-inbox-reader--visible': readerOpen }">
-              <OpenedPrivateLetter v-if="selectedMessage" :message="selectedMessage" :recipient-name="user.name" @close="closeReader" @reply="replyTo" @focus="focusMessage" />
-              <div v-else class="open-inbox-reader__empty"><span><MailOpen :size="29" /></span><p>Pilih satu surat</p><h3>Biarkan sebuah cerita<br /><em>terbuka di sini.</em></h3><small>Status akan otomatis berubah menjadi dibaca ketika surat dibuka.</small></div>
-            </div>
           </div>
 
           <div v-else class="inbox-empty"><span><MailPlus :size="28" /></span><p>Belum ada surat yang tersimpan</p><h3>Ruang ini menunggu<br /><em>cerita pertamanya.</em></h3><small>Tulis pesan kepada seorang teman—mungkin ia akan membalas dengan cerita yang juga ingin kamu simpan.</small><button type="button" @click="writeMessage">Mulai menulis <ArrowRight :size="15" /></button></div>
         </section>
 
-        <aside class="open-inbox-read-note"><CheckCheck :size="17" /><span><strong>Status baca tersimpan otomatis.</strong> Surat yang dibuka akan tetap ditandai sebagai sudah dibaca saat kamu kembali lagi.</span><Waves :size="22" /></aside>
+        <aside class="open-inbox-read-note"><MailOpen :size="17" /><span><strong>Isi tetap tersegel di daftar.</strong> Status baru berubah menjadi dibaca setelah kamu mengetuk dan membuka amplop.</span><Waves :size="22" /></aside>
         <footer class="recipient-footer"><Waves :size="18" /><span>Beberapa kata menunggu begitu lama hanya untuk menemukan waktu yang tepat.</span></footer>
       </main>
     </div>
 
     <DashboardBottomNav active="surat" @navigate="navigate" />
 
-    <Transition name="open-inbox-toast">
-      <div v-if="feedback" class="open-inbox-feedback" role="status" aria-live="polite"><span><CheckCheck :size="18" /></span><p><strong>{{ feedbackTitle }}</strong>{{ feedback }}</p></div>
-    </Transition>
   </div>
 </template>

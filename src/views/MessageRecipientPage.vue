@@ -20,7 +20,7 @@ const division = ref('all')
 const status = ref<MessageStatusFilter>('all')
 const selected = ref<Member | null>(null)
 const confirmed = ref(false)
-const statusOverrides = ref<Partial<Record<number, MessageRecipientStatus>>>({})
+const recipientStatuses = ref<Partial<Record<number, MessageRecipientStatus>>>({})
 const toast = ref('')
 let toastTimer = 0
 
@@ -35,14 +35,8 @@ function divisionFor(role: string) {
   return 'Pengurus Inti'
 }
 
-function defaultStatus(memberId: number): MessageRecipientStatus {
-  if ([2, 8, 10].includes(memberId)) return 'draft'
-  if ([1, 5, 7, 12].includes(memberId)) return 'sent'
-  return 'available'
-}
-
 function recipientStatus(memberId: number) {
-  return statusOverrides.value[memberId] || defaultStatus(memberId)
+  return recipientStatuses.value[memberId] || 'available'
 }
 
 function matchesText(member: Member) {
@@ -75,12 +69,20 @@ async function loadSession() {
     if (!response.ok) throw new Error(payload.message || 'Sesi tidak dapat dibuka.')
     user.value = payload.user
 
+    const statusesResponse = await fetch('/api/messages/recipients', { credentials: 'same-origin' })
+    const statusesPayload = await statusesResponse.json()
+    if (!statusesResponse.ok) throw new Error(statusesPayload.message || 'Status penerima belum dapat dimuat.')
+    recipientStatuses.value = Object.fromEntries(
+      statusesPayload.recipients.map((recipient: { memberId: number; status: MessageRecipientStatus }) => (
+        [recipient.memberId, recipient.status]
+      )),
+    )
+
     const savedId = Number(window.sessionStorage.getItem('kkn-message-recipient'))
     const savedMember = members.find((member) => member.id === savedId && member.id !== user.value?.memberId)
     if (savedMember) {
       selected.value = savedMember
       confirmed.value = true
-      statusOverrides.value = { ...statusOverrides.value, [savedMember.id]: 'draft' }
     }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Daftar anggota belum dapat dibuka.'
@@ -97,7 +99,6 @@ function selectRecipient(member: Member) {
 function confirmRecipient() {
   if (!selected.value) return
   confirmed.value = true
-  statusOverrides.value = { ...statusOverrides.value, [selected.value.id]: 'draft' }
   window.sessionStorage.setItem('kkn-message-recipient', String(selected.value.id))
   showToast(`${selected.value.name} dipilih sebagai penerima pesan.`)
 }

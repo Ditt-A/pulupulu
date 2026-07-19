@@ -30,11 +30,8 @@ export type InboxReadFilter = 'all' | 'unread' | 'read'
 
 export type InboxSort = 'newest' | 'oldest'
 
-export interface OpenInboxMessage {
+export interface OpenInboxSummary {
   id: number
-  title: string
-  body: string
-  closing: string
   sentAt: string
   unlockAt: string
   readAt: string | null
@@ -46,3 +43,8 @@ export interface OpenInboxMessage {
   }
 }
 
+export interface OpenInboxMessage extends OpenInboxSummary {
+  title: string
+  body: string
+  closing: string
+}
