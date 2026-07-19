@@ -2,10 +2,10 @@
 import { computed } from 'vue'
 import { LockOpen, MailOpen, Sparkles } from '@lucide/vue'
 import { members } from '@/data/members'
-import type { OpenInboxMessage } from '@/types/messages'
+import type { OpenInboxSummary } from '@/types/messages'
 
 const props = defineProps<{
-  message: OpenInboxMessage
+  message: OpenInboxSummary
   opening?: boolean
 }>()
 
@@ -24,7 +24,7 @@ const sender = computed(() => members.find((member) => member.id === props.messa
     <button type="button" class="focus-envelope" :aria-busy="opening" :disabled="opening" @click="emit('open')">
       <span class="focus-envelope__shadow" />
       <span class="focus-envelope__back" />
-      <span class="focus-envelope__letter"><MailOpen :size="21" /><small>Untukmu</small><strong>{{ message.title || 'Sebuah catatan kecil' }}</strong></span>
+      <span class="focus-envelope__letter"><MailOpen :size="21" /><small>Untukmu</small><strong>Surat yang masih tersegel</strong></span>
       <span class="focus-envelope__flap" />
       <span class="focus-envelope__front" />
       <span class="focus-envelope__seal"><LockOpen :size="20" /></span>
@@ -37,4 +37,3 @@ const sender = computed(() => members.find((member) => member.id === props.messa
     <small>Tekan Enter atau ketuk amplop</small>
   </section>
 </template>
-
