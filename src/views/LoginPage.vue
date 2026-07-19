@@ -46,9 +46,10 @@ async function submitLogin() {
       }),
     })
     const responseBody = await response.text()
+    const contentType = response.headers.get('content-type') || ''
     let payload: AuthPayload = {}
 
-    if (responseBody) {
+    if (responseBody && contentType.includes('application/json')) {
       try {
         payload = JSON.parse(responseBody) as AuthPayload
       } catch {
@@ -57,10 +58,13 @@ async function submitLogin() {
     }
 
     if (!response.ok) {
-      throw new Error(payload.message || (response.status >= 500
-        ? 'Server autentikasi belum dapat dijangkau. Pastikan server API sedang berjalan.'
-        : 'Tidak dapat masuk. Silakan coba lagi.'))
+      throw new Error(payload.message || (response.status === 404
+        ? 'Layanan login belum terhubung pada deployment ini. Hubungkan backend /api lalu deploy ulang.'
+        : response.status >= 500
+          ? 'Server autentikasi belum dapat dijangkau. Pastikan server API sedang berjalan.'
+          : 'Tidak dapat masuk. Silakan coba lagi.'))
     }
+    if (!contentType.includes('application/json')) throw new Error('Server autentikasi mengirim respons yang tidak valid.')
     if (!payload.user) throw new Error('Data akun tidak ditemukan dalam respons server.')
 
     authenticatedUser.value = payload.user
@@ -93,7 +97,7 @@ async function submitLogin() {
 
       <blockquote>
         <p>“Beberapa tempat tak hanya kita kunjungi—<em>mereka ikut tinggal di dalam diri.</em>”</p>
-        <footer><span /> Desa Pesisir Harapan · 2026</footer>
+        <footer><span /> Desa Sumbersih · Juli - Agustus 2026</footer>
       </blockquote>
 
       <div class="auth-page__visual-meta">

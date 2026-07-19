@@ -1,8 +1,7 @@
-# Database akun Pulupulu
+# Arsip database SQLite Pulupulu
 
-Jalankan `npm run seed` untuk membuat `database/pulupulu.sqlite` dan mengisi 13 akun anggota serta satu akun admin.
+Folder ini hanya dipertahankan untuk file SQLite lokal versi lama. Backend aktif sekarang menggunakan PostgreSQL Neon melalui `DATABASE_URL`.
 
-Password awal berada di `server/seed-data.mjs` agar proses seeding dapat diulang. Di SQLite, password hanya disimpan sebagai salted scrypt hash dan seluruh akun ditandai untuk mengganti password setelah login pertama.
+Jalankan `npm run db:migrate` lalu `npm run seed` untuk menyiapkan 13 akun anggota dan satu akun admin di PostgreSQL. Nilai password awal dibaca dari environment variable `SEED_PASSWORD_*` pada `.env.local`, kemudian hanya hash scrypt beserta salt yang disimpan ke database.
 
-File SQLite tidak disimpan ke Git karena berisi data autentikasi lokal.
-
+File SQLite lama dan `.env.local` tidak disimpan ke Git. Data SQLite tidak diimpor otomatis ke PostgreSQL.

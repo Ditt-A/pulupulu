@@ -6,17 +6,20 @@
   "scripts": {
     "dev": "run-p dev:web dev:api",
     "dev:web": "vite",
-    "dev:api": "node --watch server/index.mjs",
+    "dev:api": "node --env-file-if-exists=.env.local --watch server/index.mjs",
     "dev:full": "run-p dev:web dev:api",
     "build": "run-p type-check \"build-only {@}\" --",
     "preview": "vite preview",
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
-    "seed": "node server/seed.mjs",
-    "start": "node server/index.mjs"
+    "db:migrate": "node --env-file-if-exists=.env.local server/migrate.mjs",
+    "seed": "node --env-file-if-exists=.env.local server/seed.mjs",
+    "db:setup": "npm run db:migrate && npm run seed",
+    "start": "node --env-file-if-exists=.env.local server/index.mjs"
   },
   "dependencies": {
     "@lucide/vue": "^1.24.0",
+    "@neondatabase/serverless": "^1.1.0",
     "vue": "^3.5.38"
   },
   "devDependencies": {

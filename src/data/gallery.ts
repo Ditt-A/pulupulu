@@ -1,0 +1,193 @@
+export type GalleryCategory = 'kebersamaan' | 'pengabdian' | 'desa' | 'perpisahan'
+
+export interface GalleryMemory {
+  slug: string
+  image: string
+  title: string
+  date: string
+  location: string
+  caption: string
+  count?: number
+  size: 'wide' | 'tall' | 'normal' | 'polaroid'
+  category: GalleryCategory
+}
+
+export const galleryCategories: Array<{ value: 'all' | GalleryCategory; label: string }> = [
+  { value: 'all', label: 'Semua kenangan' },
+  { value: 'kebersamaan', label: 'Kebersamaan' },
+  { value: 'pengabdian', label: 'Pengabdian' },
+  { value: 'desa', label: 'Cerita desa' },
+  { value: 'perpisahan', label: 'Perpisahan' },
+]
+
+export const fullGallery: GalleryMemory[] = [
+  {
+    slug: 'tiga-belas-cerita',
+    image: '/images/kkn-group-hero.png',
+    title: 'Satu bingkai, tiga belas cerita',
+    date: '12 Juli 2026',
+    location: 'Desa Sumbersih',
+    caption: 'Potret pertama sebelum kami benar-benar saling mengenal.',
+    count: 13,
+    size: 'wide',
+    category: 'kebersamaan',
+  },
+  {
+    slug: 'teman-jadi-rumah',
+    image: 'https://images.unsplash.com/photo-1529156069898-49953e39b3ac?auto=format&fit=crop&w=1200&q=88',
+    title: 'Teman yang perlahan jadi rumah',
+    date: '16 Juli 2026',
+    location: 'Posko MMD',
+    caption: 'Tidak ada agenda. Hanya sore, cerita, dan tawa yang panjang.',
+    count: 18,
+    size: 'tall',
+    category: 'kebersamaan',
+  },
+  {
+    slug: 'semua-turun-tangan',
+    image: 'https://images.unsplash.com/photo-1517486808906-6ca8b3f04846?auto=format&fit=crop&w=1200&q=88',
+    title: 'Hari ketika semua ikut turun tangan',
+    date: '22 Juli 2026',
+    location: 'Balai Desa Sumbersih',
+    caption: 'Pekerjaan besar terasa ringan ketika dilakukan bersama.',
+    count: 24,
+    size: 'normal',
+    category: 'pengabdian',
+  },
+  {
+    slug: 'mengabdi-juga-belajar',
+    image: 'https://images.unsplash.com/photo-1559027615-cd4628902d4a?auto=format&fit=crop&w=1200&q=88',
+    title: 'Mengabdi, juga belajar',
+    date: '27 Juli 2026',
+    location: 'Desa Sumbersih',
+    caption: 'Desa ini memberi kami jauh lebih banyak dari yang kami bawa.',
+    count: 31,
+    size: 'polaroid',
+    category: 'pengabdian',
+  },
+  {
+    slug: 'jeda-di-posko',
+    image: 'https://images.unsplash.com/photo-1506869640319-fe1a24fd76dc?auto=format&fit=crop&w=1200&q=88',
+    title: 'Jeda di antara kesibukan',
+    date: '31 Juli 2026',
+    location: 'Teras Posko',
+    caption: 'Lima menit istirahat yang berubah jadi satu jam bercerita.',
+    count: 16,
+    size: 'normal',
+    category: 'kebersamaan',
+  },
+  {
+    slug: 'malam-tak-ingin-selesai',
+    image: 'https://images.unsplash.com/photo-1527529482837-4698179dc6ce?auto=format&fit=crop&w=1200&q=88',
+    title: 'Malam yang tak ingin selesai',
+    date: '7 Agustus 2026',
+    location: 'Halaman Posko',
+    caption: 'Bernyanyi pelan agar besok datang sedikit lebih lambat.',
+    count: 28,
+    size: 'tall',
+    category: 'perpisahan',
+  },
+  {
+    slug: 'senja-terakhir',
+    image: '/images/kkn-coast-sunset.png',
+    title: 'Senja terakhir di Sumbersih',
+    date: '8 Agustus 2026',
+    location: 'Desa Sumbersih',
+    caption: 'Langit yang sama, arah pulang yang berbeda.',
+    count: 27,
+    size: 'wide',
+    category: 'perpisahan',
+  },
+  {
+    slug: 'pagi-yang-sibuk',
+    image: 'https://images.unsplash.com/photo-1539635278303-d4002c07eae3?auto=format&fit=crop&w=1200&q=88',
+    title: 'Pagi yang selalu dimulai lebih cepat',
+    date: '18 Juli 2026',
+    location: 'Jalan Desa Sumbersih',
+    caption: 'Mengejar jadwal sambil membawa perlengkapan dan semangat yang belum sepenuhnya bangun.',
+    size: 'tall',
+    category: 'desa',
+  },
+  {
+    slug: 'belajar-bersama',
+    image: 'https://images.unsplash.com/photo-1542810634-71277d95dcbb?auto=format&fit=crop&w=1200&q=88',
+    title: 'Sore untuk belajar bersama',
+    date: '20 Juli 2026',
+    location: 'Ruang Belajar Warga',
+    caption: 'Buku-buku dibuka, pertanyaan bermunculan, dan sore berlalu tanpa terasa.',
+    size: 'normal',
+    category: 'pengabdian',
+  },
+  {
+    slug: 'menyapa-warga',
+    image: 'https://images.unsplash.com/photo-1469571486292-0ba58a3f068b?auto=format&fit=crop&w=1200&q=88',
+    title: 'Menyapa, mendengar, memahami',
+    date: '23 Juli 2026',
+    location: 'Balai Desa Sumbersih',
+    caption: 'Cerita warga menjadi kompas agar setiap program benar-benar menemukan arahnya.',
+    size: 'wide',
+    category: 'desa',
+  },
+  {
+    slug: 'dapur-kecil',
+    image: 'https://images.unsplash.com/photo-1528605248644-14dd04022da1?auto=format&fit=crop&w=1200&q=88',
+    title: 'Dapur kecil, meja yang selalu ramai',
+    date: '25 Juli 2026',
+    location: 'Posko MMD',
+    caption: 'Menu sederhana terasa istimewa karena selalu disantap dengan cerita hari itu.',
+    size: 'normal',
+    category: 'kebersamaan',
+  },
+  {
+    slug: 'langkah-kecil',
+    image: 'https://images.unsplash.com/photo-1488521787991-ed7bbaae773c?auto=format&fit=crop&w=1200&q=88',
+    title: 'Langkah kecil yang dikerjakan bersama',
+    date: '29 Juli 2026',
+    location: 'Desa Sumbersih',
+    caption: 'Bukan tentang seberapa besar yang kami bawa, melainkan seberapa tulus kami hadir.',
+    size: 'tall',
+    category: 'pengabdian',
+  },
+  {
+    slug: 'hujan-dan-rencana',
+    image: 'https://images.unsplash.com/photo-1494386346843-e12284507169?auto=format&fit=crop&w=1200&q=88',
+    title: 'Hujan yang mengubah rencana',
+    date: '2 Agustus 2026',
+    location: 'Posko MMD',
+    caption: 'Beberapa agenda tertunda, tetapi obrolan hangat justru menemukan waktunya.',
+    size: 'normal',
+    category: 'kebersamaan',
+  },
+  {
+    slug: 'wajah-sumbersih',
+    image: 'https://images.unsplash.com/photo-1489493512598-d08130f49bea?auto=format&fit=crop&w=1200&q=88',
+    title: 'Wajah-wajah yang akan selalu kami ingat',
+    date: '4 Agustus 2026',
+    location: 'Desa Sumbersih',
+    caption: 'Keramahan yang membuat tiga puluh hari terasa terlalu singkat.',
+    size: 'tall',
+    category: 'desa',
+  },
+  {
+    slug: 'program-terakhir',
+    image: 'https://images.unsplash.com/photo-1541532713592-79a0317b6b77?auto=format&fit=crop&w=1200&q=88',
+    title: 'Program terakhir, tepuk tangan terpanjang',
+    date: '6 Agustus 2026',
+    location: 'Balai Desa Sumbersih',
+    caption: 'Ada lega, bangga, dan sedikit sedih ketika daftar kegiatan akhirnya selesai.',
+    size: 'wide',
+    category: 'pengabdian',
+  },
+  {
+    slug: 'sebelum-pulang',
+    image: 'https://images.unsplash.com/photo-1511632765486-a01980e01a18?auto=format&fit=crop&w=1200&q=88',
+    title: 'Satu pelukan sebelum pulang',
+    date: '8 Agustus 2026',
+    location: 'Halaman Posko',
+    caption: 'Kami berjanji perpisahan ini bukan akhir dari cara kami saling menjaga.',
+    size: 'normal',
+    category: 'perpisahan',
+  },
+]
+
+export const landingGallery = fullGallery.slice(0, 7)

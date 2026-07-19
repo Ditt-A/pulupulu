@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted } from 'vue'
-import { ArrowRight, CheckCheck, Clock3, KeyRound, LockKeyhole, Mail, RefreshCw, Send, ShieldCheck, Sparkles, UserCheck, UsersRound, Waves } from '@lucide/vue'
+import { ArrowRight, CheckCheck, Clock3, LockKeyhole, Mail, RefreshCw, Send, ShieldCheck, Sparkles, UsersRound, Waves } from '@lucide/vue'
 import AdminBottomNav from '@/components/admin/AdminBottomNav.vue'
 import AdminMemberTable from '@/components/admin/AdminMemberTable.vue'
 import AdminMessageChart from '@/components/admin/AdminMessageChart.vue'
@@ -85,7 +85,7 @@ onMounted(admin.initialize)
       <AdminTopbar :user="state.user" :refreshing="state.refreshing" :generated-at="state.overview.generatedAt" @menu="state.menuOpen = true" @refresh="admin.refresh" />
       <main class="admin-content">
         <section id="admin-ringkasan" class="admin-hero">
-          <img src="/images/kkn-coast-sunset.png" alt="Garis pantai Pesisir Harapan" /><div class="admin-hero__overlay" />
+          <img src="/images/kkn-coast-sunset.png" alt="Garis pantai Desa Sumbersih" /><div class="admin-hero__overlay" />
           <svg viewBox="0 0 900 170" preserveAspectRatio="none" aria-hidden="true"><path d="M-25 86 C130 22 280 146 450 80 S735 42 925 105"/><path d="M-35 126 C145 72 300 175 485 120 S760 85 935 140"/></svg>
           <div class="admin-hero__copy"><p><Sparkles :size="13" /> Pusat kendali kenangan</p><h1>{{ greeting }},<br /><em>{{ firstName }}.</em></h1><span>Tiga belas cerita sedang dijaga dari satu ruang yang tenang.</span></div>
           <div class="admin-hero__meta"><span><ShieldCheck :size="15" /><small>Status sistem</small><strong>Semua layanan aktif</strong></span><i /><span><Clock3 :size="15" /><small>Periode statistik</small><strong>{{ periodLabel }}</strong></span></div>
@@ -127,11 +127,6 @@ onMounted(admin.initialize)
 
         <section id="admin-anggota">
           <AdminMemberTable :members="admin.filteredMembers.value" :total="stats.totalMembers" :query="state.memberQuery" :status="state.memberStatus" @update:query="admin.setMemberQuery" @update:status="admin.setMemberStatus" />
-        </section>
-
-        <section id="admin-keamanan" class="admin-security-grid">
-          <article><span><KeyRound :size="20" /></span><div><p>Kata sandi awal</p><h2>{{ stats.initialPasswordAccounts }} akun perlu perhatian</h2><small>Akun berstatus ini belum mengganti kata sandi yang dibuat oleh seeder.</small></div><strong>{{ stats.securityRate }}%</strong></article>
-          <article><span><UserCheck :size="20" /></span><div><p>Sesi terverifikasi</p><h2>{{ stats.activeSessions }} sesi sedang aktif</h2><small>Sesi kedaluwarsa dibersihkan otomatis oleh server.</small></div><strong>{{ stats.activeSessions }}</strong></article>
         </section>
 
         <footer class="admin-footer"><span><Waves :size="18" /> PULUPULU · RUANG PENGELOLA</span><p>Data dijaga seperlunya, kenangan dijaga sepenuhnya.</p></footer>

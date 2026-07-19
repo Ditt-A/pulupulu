@@ -1,42 +1,52 @@
-# pulupulu
+# Pulupulu
 
-This template should help get you started developing with Vue 3 in Vite.
+Website kenangan MMD FILKOM 33 dengan Vue, Vite, Vercel Function, dan PostgreSQL Neon.
 
-## Recommended IDE Setup
+## Menjalankan secara lokal
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
-
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Type Support for `.vue` Imports in TS
-
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
+Pastikan Node.js sesuai versi pada `package.json`, lalu pasang dependensi:
 
 ```sh
 npm install
 ```
 
-### Compile and Hot-Reload for Development
+Salin `.env.example` menjadi `.env.local`, kemudian isi connection string PostgreSQL Neon dan seluruh `SEED_PASSWORD_*` dengan password awal baru:
+
+```env
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require
+SEED_PASSWORD_ALBERT_PASUNDA="Contoh#Baru2026!"
+```
+
+Jangan commit `.env.local`, connection string, atau password database ke Git. `server/seed-data.mjs` hanya menyimpan identitas akun dan nama environment variable, bukan nilai password. Password seed lama pernah tersimpan di riwayat Git, sehingga jangan dipakai kembali untuk database produksi.
+
+Siapkan tabel dan akun awal secara berurutan:
+
+```sh
+npm run db:migrate
+npm run seed
+```
+
+Keduanya juga dapat dijalankan sekaligus dengan `npm run db:setup`. Setelah itu, jalankan frontend dan API lokal:
 
 ```sh
 npm run dev
 ```
 
-### Type-Check, Compile and Minify for Production
+## Deploy ke Vercel dan Neon
+
+1. Hubungkan repository ke Vercel.
+2. Tambahkan integrasi Neon melalui Vercel Marketplace dan hubungkan databasenya ke project. Integrasi tersebut menyediakan `DATABASE_URL` sebagai environment variable.
+3. Ambil environment project dengan `npx vercel env pull .env.local` (atau salin `DATABASE_URL` dari Neon), lalu isi kembali seluruh `SEED_PASSWORD_*` di file lokal tersebut.
+4. Jalankan `npm run db:migrate`, lalu `npm run seed` secara sengaja untuk database tujuan.
+5. Deploy project. Frontend dibangun dari Vite dan endpoint `/api/*` dijalankan melalui Vercel Function.
+
+Migrasi dan seed tidak dijalankan otomatis pada setiap deploy. Jalankan migrasi hanya saat ada perubahan schema, dan seed hanya saat ingin membuat atau memperbarui akun awal. Seeder tidak menghapus pesan yang sudah tersimpan, tetapi mereset password akun seed dan mengakhiri seluruh sesi login aktif.
+
+Database PostgreSQL dimulai sebagai database baru. Data dari file SQLite lama tidak disalin otomatis; lakukan import terpisah jika data lama memang perlu dipertahankan.
+
+## Pemeriksaan produksi
 
 ```sh
+npm run type-check
 npm run build
 ```

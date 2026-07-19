@@ -142,7 +142,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer))
                 <div><dt><Waves :size="15" /> Peran di kelompok</dt><dd>{{ user.role }}</dd></div>
                 <div><dt><ShieldCheck :size="15" /> Jenis akses</dt><dd>{{ accountLabel }}</dd></div>
                 <div><dt><CalendarDays :size="15" /> Bergabung</dt><dd>Juli 2026</dd></div>
-                <div><dt><MapPin :size="15" /> Perjalanan</dt><dd>Desa Pesisir Harapan</dd></div>
+                <div><dt><MapPin :size="15" /> Perjalanan</dt><dd>Desa Sumbersih</dd></div>
               </dl>
             </article>
 

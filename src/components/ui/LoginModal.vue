@@ -18,7 +18,7 @@ function submit() {
   <Teleport to="body">
     <Transition name="modal">
       <div v-if="open" class="login-backdrop" @click.self="emit('close')">
-        <form class="login-card" role="dialog" aria-modal="true" aria-label="Masuk ke ruang anggota" @submit.prevent="submit">
+        <form class="login-card" role="dialog" aria-modal="true" aria-label="Formulir login anggota" @submit.prevent="submit">
           <button type="button" class="login-card__close" aria-label="Tutup" @click="emit('close')"><X :size="19" /></button>
           <div class="login-card__brand"><span><Waves :size="22" /></span><b>PULUPULU</b></div>
           <p class="eyebrow"><span /> Ruang anggota</p>

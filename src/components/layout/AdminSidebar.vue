@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ChartNoAxesCombined, ExternalLink, LayoutDashboard, LockKeyhole, LogOut, Mail, ShieldCheck, UsersRound, Waves, X } from '@lucide/vue'
+import { ChartNoAxesCombined, ExternalLink, LayoutDashboard, LockKeyhole, LogOut, Mail, UsersRound, Waves, X } from '@lucide/vue'
 import type { AuthUser } from '@/types/auth'
 
 const props = defineProps<{ user: AuthUser; active: string }>()
@@ -12,7 +12,6 @@ const items = [
   { id: 'pesan', label: 'Pesan privat', icon: Mail },
   { id: 'monitoring', label: 'Monitoring pesan', icon: ChartNoAxesCombined },
   { id: 'akses', label: 'Akses pesan', icon: LockKeyhole },
-  { id: 'keamanan', label: 'Keamanan', icon: ShieldCheck },
 ]
 </script>
 

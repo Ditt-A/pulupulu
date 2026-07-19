@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
-import { ArrowLeft, ArrowRight, CircleCheck, Clock3, LockKeyhole, Mail, RefreshCw, Send, Sparkles, Target, UsersRound, Waves } from '@lucide/vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { AlertTriangle, ArrowLeft, ArrowRight, CircleCheck, Clock3, LockKeyhole, Mail, RefreshCw, Send, Sparkles, Target, Trash2, UsersRound, Waves } from '@lucide/vue'
 import AdminBottomNav from '@/components/admin/AdminBottomNav.vue'
 import AdminStatCard from '@/components/admin/AdminStatCard.vue'
 import AdminTopbar from '@/components/admin/AdminTopbar.vue'
@@ -9,6 +9,8 @@ import CompletionTrendChart from '@/components/admin/CompletionTrendChart.vue'
 import MemberCompletionChart from '@/components/admin/MemberCompletionChart.vue'
 import MessageCompletionMatrix from '@/components/admin/MessageCompletionMatrix.vue'
 import AdminSidebar from '@/components/layout/AdminSidebar.vue'
+import ConfirmationModal from '@/components/ui/ConfirmationModal.vue'
+import ToastNotification from '@/components/ui/ToastNotification.vue'
 import { useAdminStore } from '@/stores/admin'
 import type { AdminPeriod } from '@/types/admin'
 
@@ -16,6 +18,9 @@ const admin = useAdminStore()
 const state = admin.state
 const progress = computed(() => state.messageProgress)
 const stats = computed(() => progress.value?.statistics)
+const resetConfirmationOpen = ref(false)
+const toast = ref({ show: false, title: '', message: '' })
+let toastTimer = 0
 const periods: Array<{ value: AdminPeriod; label: string }> = [{ value: '7d', label: '7 hari' }, { value: '30d', label: '30 hari' }, { value: 'all', label: 'Sepanjang waktu' }]
 
 const trendPoints = computed(() => {
@@ -50,6 +55,30 @@ const notStartedMembers = computed(() => (progress.value?.members ?? []).filter(
 const nearlyCompleteMembers = computed(() => (progress.value?.members ?? []).filter((member) => member.progress >= 75 && member.progress < 100))
 const periodLabel = computed(() => periods.find((period) => period.value === state.period)?.label || 'Sepanjang waktu')
 
+function requestMessageReset() {
+  state.messageResetError = ''
+  resetConfirmationOpen.value = true
+}
+
+function showResetSuccess(total: number, drafts: number, sent: number) {
+  const message = total
+    ? `${total} pesan dihapus, terdiri dari ${drafts} draf dan ${sent} surat terkirim. Akun serta pengaturan akses tetap tersimpan.`
+    : 'Database pesan memang sudah kosong. Akun serta pengaturan akses tetap tersimpan.'
+  toast.value = { show: true, title: 'Semua pesan sudah dikosongkan', message }
+  window.clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => { toast.value.show = false }, 5500)
+}
+
+async function confirmMessageReset() {
+  try {
+    const result = await admin.resetAllMessages()
+    resetConfirmationOpen.value = false
+    showResetSuccess(result.deleted.total, result.deleted.drafts, result.deleted.sent)
+  } catch {
+    resetConfirmationOpen.value = false
+  }
+}
+
 function navigate(section: string) {
   state.menuOpen = false
   if (section === 'monitoring') return
@@ -64,6 +93,7 @@ async function logout() {
 }
 
 onMounted(admin.initializeMessageProgress)
+onBeforeUnmount(() => window.clearTimeout(toastTimer))
 </script>
 
 <template>
@@ -86,7 +116,7 @@ onMounted(admin.initializeMessageProgress)
         <a class="access-back" href="/admin"><ArrowLeft :size="15" /> Kembali ke ringkasan</a>
 
         <section class="monitoring-hero">
-          <img src="/images/kkn-coast-sunset.png" alt="Laut tenang di Pesisir Harapan" /><div class="monitoring-hero__overlay" />
+          <img src="/images/kkn-coast-sunset.png" alt="Laut tenang di Desa Sumbersih" /><div class="monitoring-hero__overlay" />
           <svg viewBox="0 0 940 190" preserveAspectRatio="none" aria-hidden="true"><path d="M-20 91 C140 24 295 152 470 84 S760 39 960 110"/><path d="M-30 138 C145 82 315 184 500 130 S785 91 970 150"/></svg>
           <div class="monitoring-hero__copy"><p><Sparkles :size="13" /> Peta perjalanan pesan</p><h1>Setiap nama menuju<br /><em>dua belas cerita.</em></h1><span>Progres dihitung dari pasangan pengirim dan penerima yang unik—bukan dari banyaknya pesan yang dikirim berulang.</span></div>
           <div class="monitoring-hero__progress"><CompletionDonutChart :value="stats.completionPercentage" :completed="stats.completedPairs" :target="stats.targetPairs" /><span><small>Pasangan selesai</small><strong>{{ stats.completedPairs }} / {{ stats.targetPairs }}</strong><i /><p>{{ stats.remainingPairs }} hubungan pesan masih menunggu cerita.</p></span></div>
@@ -94,6 +124,7 @@ onMounted(admin.initializeMessageProgress)
 
         <div class="monitoring-toolbar"><span>Rentang monitoring</span><div><button v-for="period in periods" :key="period.value" :class="{ active: state.period === period.value }" :disabled="state.progressLoading" @click="admin.setMonitoringPeriod(period.value)">{{ period.label }}</button></div><button :disabled="state.progressLoading" @click="admin.loadMessageProgress"><RefreshCw :class="{ spinning: state.progressLoading }" :size="14" /> Perbarui</button></div>
         <div v-if="state.progressError" class="access-error" role="alert"><Target :size="17" /><span><strong>Data belum diperbarui.</strong>{{ state.progressError }}</span><button @click="state.progressError = ''">Tutup</button></div>
+        <div v-if="state.messageResetError" class="access-error" role="alert"><AlertTriangle :size="17" /><span><strong>Pesan belum dapat dikosongkan.</strong>{{ state.messageResetError }}</span><button @click="state.messageResetError = ''">Tutup</button></div>
 
         <section class="admin-stat-grid monitoring-stat-grid">
           <AdminStatCard label="Progres keseluruhan" :value="`${stats.completionPercentage}%`" :icon="Target" tone="teal" :note="`${stats.completedPairs} pasangan selesai`" :progress="stats.completionPercentage" />
@@ -114,9 +145,137 @@ onMounted(admin.initializeMessageProgress)
           <article><span><Mail :size="19" /></span><div><p>Belum memulai</p><h2>{{ notStartedMembers.length }} anggota</h2><small>{{ notStartedMembers.length ? notStartedMembers.map((member) => member.name.split(' ')[0]).join(', ') : 'Semua anggota sudah mengirim sedikitnya satu surat.' }}</small></div></article>
           <article><span><CircleCheck :size="19" /></span><div><p>Hampir selesai</p><h2>{{ nearlyCompleteMembers.length }} anggota</h2><small>{{ nearlyCompleteMembers.length ? nearlyCompleteMembers.map((member) => member.name.split(' ')[0]).join(', ') : 'Belum ada anggota pada rentang 75–99%.' }}</small></div></article>
         </section>
+
+        <section class="monitoring-reset-card">
+          <span class="monitoring-reset-card__icon"><Trash2 :size="22" /></span>
+          <div class="monitoring-reset-card__copy">
+            <p>Alat pengujian admin</p>
+            <h2>Kosongkan seluruh pesan</h2>
+            <small>Hapus semua draf, surat terkirim, serta status baca agar pengujian dapat dimulai dari awal. Akun anggota dan pengaturan akses tidak ikut dihapus.</small>
+            <span><AlertTriangle :size="13" /> Tutup tab penulisan anggota yang masih terbuka agar auto-save tidak membuat draf baru setelah reset.</span>
+          </div>
+          <div class="monitoring-reset-card__summary" aria-label="Ringkasan pesan yang akan dihapus">
+            <span><strong>{{ stats.totalMessages + stats.totalDrafts }}</strong><small>total data</small></span>
+            <i />
+            <span><strong>{{ stats.totalDrafts }}</strong><small>draf</small></span>
+          </div>
+          <button type="button" :disabled="state.messageResetting" @click="requestMessageReset"><RefreshCw v-if="state.messageResetting" class="spinning" :size="16" /><Trash2 v-else :size="16" />{{ state.messageResetting ? 'Mengosongkan…' : 'Reset semua pesan' }}</button>
+        </section>
         <footer class="admin-footer"><span><Waves :size="18" /> PULUPULU · MONITORING PESAN</span><p>Angka menunjukkan arah; setiap surat tetap menyimpan cerita miliknya sendiri.</p></footer>
       </main>
     </div>
     <AdminBottomNav active="monitoring" @navigate="navigate" />
+    <ConfirmationModal :open="resetConfirmationOpen" tone="danger" eyebrow="Konfirmasi pengosongan data" title="Kosongkan seluruh pesan testing?" description="Tindakan ini permanen dan akan menghapus semua draf, surat terkirim, serta status baca. Akun anggota, sesi login, dan jadwal akses tetap tersimpan. Tutup tab penulisan anggota yang masih terbuka agar auto-save tidak membuat draf baru." confirm-label="Ya, hapus semua pesan" cancel-label="Batalkan" loading-label="Mengosongkan pesan…" confirmation-phrase="HAPUS SEMUA PESAN" :loading="state.messageResetting" @close="resetConfirmationOpen = false" @confirm="confirmMessageReset" />
+    <ToastNotification :show="toast.show" :title="toast.title" :message="toast.message" @close="toast.show = false" />
   </div>
 </template>
+
+<style scoped>
+.monitoring-reset-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 17px;
+  margin-top: 15px;
+  padding: 20px 22px;
+  border: 1px solid rgba(163, 66, 53, .15);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(255, 250, 247, .92), rgba(249, 237, 228, .76));
+  box-shadow: 0 14px 34px rgba(112, 58, 43, .05);
+}
+
+.monitoring-reset-card__icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  color: #a34235;
+  border-radius: 13px;
+  background: #f8dfd8;
+}
+
+.monitoring-reset-card__copy p {
+  margin: 0 0 3px;
+  color: #a45a4c;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+
+.monitoring-reset-card__copy h2 {
+  margin: 0;
+  color: var(--ocean-900);
+  font-family: 'Italiana';
+  font-size: 23px;
+  font-weight: 400;
+}
+
+.monitoring-reset-card__copy small {
+  display: block;
+  max-width: 630px;
+  margin-top: 4px;
+  color: #857e79;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.monitoring-reset-card__copy > span {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 7px;
+  color: #9b564a;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.monitoring-reset-card__copy > span svg { flex: 0 0 auto; margin-top: 1px; }
+
+.monitoring-reset-card__summary {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 9px 13px;
+  border: 1px solid rgba(163, 66, 53, .1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .58);
+}
+
+.monitoring-reset-card__summary span { display: flex; align-items: center; flex-direction: column; }
+.monitoring-reset-card__summary strong { color: #74473f; font-size: 17px; }
+.monitoring-reset-card__summary small { color: #9d817a; font-size: 10px; white-space: nowrap; }
+.monitoring-reset-card__summary i { width: 1px; height: 27px; background: rgba(163, 66, 53, .13); }
+
+.monitoring-reset-card > button {
+  min-height: 39px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  color: white;
+  border: 0;
+  border-radius: 11px;
+  background: #a34235;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: 0 9px 20px rgba(132, 48, 38, .16);
+  transition: transform .2s ease, background .2s ease;
+}
+
+.monitoring-reset-card > button:hover:not(:disabled) { background: #87362d; transform: translateY(-1px); }
+.monitoring-reset-card > button:disabled { opacity: .55; cursor: wait; }
+.monitoring-reset-card .spinning { animation: admin-spin .85s linear infinite; }
+
+@media (max-width: 1040px) {
+  .monitoring-reset-card { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .monitoring-reset-card__summary { display: none; }
+}
+
+@media (max-width: 680px) {
+  .monitoring-reset-card { grid-template-columns: auto minmax(0, 1fr); padding: 19px 18px; }
+  .monitoring-reset-card > button { grid-column: 1 / -1; width: 100%; }
+}
+</style>

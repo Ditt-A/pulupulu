@@ -1,261 +1,321 @@
 import { createReadStream, existsSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { extname, join, normalize } from 'node:path'
+import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash, randomBytes } from 'node:crypto'
-import { createSchema, databasePath, hashPassword, openDatabase, verifyPassword } from './database.mjs'
+import {
+  closeDatabase,
+  databaseProvider,
+  hashPassword,
+  query,
+  verifyPassword,
+  withTransaction,
+} from './database.mjs'
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url))
 const distRoot = join(projectRoot, 'dist')
 const port = Number(process.env.PORT || 8787)
-const database = openDatabase()
-createSchema(database)
+const host = process.env.HOST || '127.0.0.1'
 
-const findUser = database.prepare(`
+function executeQuery(text, parameters = [], executor = null) {
+  return executor ? executor.query(text, parameters) : query(text, parameters)
+}
+
+async function queryOne(text, parameters = [], executor = null) {
+  const result = await executeQuery(text, parameters, executor)
+  return result.rows[0] || null
+}
+
+async function queryRows(text, parameters = [], executor = null) {
+  const result = await executeQuery(text, parameters, executor)
+  return result.rows
+}
+
+async function executeStatement(text, parameters = [], executor = null) {
+  const result = await executeQuery(text, parameters, executor)
+  return Number(result.rowCount || 0)
+}
+
+function normalizeId(value) {
+  const numericValue = Number(value)
+  return Number.isSafeInteger(numericValue) ? numericValue : value
+}
+
+function idsMatch(left, right) {
+  return String(left) === String(right)
+}
+
+const statements = {
+  findUser: `
   SELECT id, username, password_hash, password_salt, display_name,
          account_type, division_role, member_id, must_change_password
   FROM users
-  WHERE username = ? AND is_active = 1
+  WHERE LOWER(username) = LOWER($1) AND is_active = TRUE
   LIMIT 1
-`)
-const recordLogin = database.prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?')
-const createSession = database.prepare('INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, ?)')
-const findSession = database.prepare(`
+`,
+  recordLogin: 'UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1',
+  createSession: `
+    INSERT INTO sessions (user_id, token_hash, expires_at)
+    VALUES ($1, $2, $3::timestamptz)
+  `,
+  findSession: `
   SELECT u.id, u.member_id, u.username, u.display_name, u.account_type,
          u.division_role, u.must_change_password
   FROM sessions s
   JOIN users u ON u.id = s.user_id
-  WHERE s.token_hash = ?
+  WHERE s.token_hash = $1
     AND s.expires_at > CURRENT_TIMESTAMP
-    AND u.is_active = 1
+    AND u.is_active = TRUE
   LIMIT 1
-`)
-const deleteSession = database.prepare('DELETE FROM sessions WHERE token_hash = ?')
-const findPasswordUserById = database.prepare(`
+`,
+  deleteSession: 'DELETE FROM sessions WHERE token_hash = $1',
+  findPasswordUserById: `
   SELECT id, username, password_hash, password_salt
   FROM users
-  WHERE id = ? AND is_active = 1
+  WHERE id = $1 AND is_active = TRUE
   LIMIT 1
-`)
-const updateUserPassword = database.prepare(`
+`,
+  updateUserPassword: `
   UPDATE users
-  SET password_hash = ?, password_salt = ?, must_change_password = 0,
+  SET password_hash = $1, password_salt = $2, must_change_password = FALSE,
       updated_at = CURRENT_TIMESTAMP
-  WHERE id = ?
-`)
-const deleteOtherUserSessions = database.prepare(`
+  WHERE id = $3
+`,
+  deleteOtherUserSessions: `
   DELETE FROM sessions
-  WHERE user_id = ? AND token_hash <> ?
-`)
-const deleteAllUserSessions = database.prepare('DELETE FROM sessions WHERE user_id = ?')
-const findRecipientByMemberId = database.prepare(`
+  WHERE user_id = $1 AND token_hash <> $2
+`,
+  deleteAllUserSessions: 'DELETE FROM sessions WHERE user_id = $1',
+  findRecipientByMemberId: `
   SELECT id, member_id, display_name, division_role
   FROM users
-  WHERE member_id = ? AND account_type = 'member' AND is_active = 1
+  WHERE member_id = $1 AND account_type = 'member' AND is_active = TRUE
   LIMIT 1
-`)
-const findDraft = database.prepare(`
+`,
+  findDraft: `
   SELECT id, title, body, closing, status, updated_at
   FROM private_messages
-  WHERE sender_user_id = ? AND recipient_user_id = ? AND status = 'draft'
+  WHERE sender_user_id = $1 AND recipient_user_id = $2 AND status = 'draft'
   LIMIT 1
-`)
-const upsertDraft = database.prepare(`
+`,
+  upsertDraft: `
   INSERT INTO private_messages (
     sender_user_id, recipient_user_id, title, body, closing, status, updated_at
-  ) VALUES (?, ?, ?, ?, ?, 'draft', CURRENT_TIMESTAMP)
+  ) VALUES ($1, $2, $3, $4, $5, 'draft', CURRENT_TIMESTAMP)
   ON CONFLICT(sender_user_id, recipient_user_id) WHERE status = 'draft'
   DO UPDATE SET
-    title = excluded.title,
-    body = excluded.body,
-    closing = excluded.closing,
+    title = EXCLUDED.title,
+    body = EXCLUDED.body,
+    closing = EXCLUDED.closing,
     updated_at = CURRENT_TIMESTAMP
   RETURNING id, title, body, closing, status, updated_at
-`)
-const deleteDraft = database.prepare(`
+`,
+  deleteDraft: `
   DELETE FROM private_messages
-  WHERE sender_user_id = ? AND recipient_user_id = ? AND status = 'draft'
-`)
-const sendExistingDraft = database.prepare(`
+  WHERE sender_user_id = $1 AND recipient_user_id = $2 AND status = 'draft'
+`,
+  sendExistingDraft: `
   UPDATE private_messages
-  SET title = ?, body = ?, closing = ?, status = 'sent',
+  SET title = $1, body = $2, closing = $3, status = 'sent',
       updated_at = CURRENT_TIMESTAMP, sent_at = CURRENT_TIMESTAMP
-  WHERE sender_user_id = ? AND recipient_user_id = ? AND status = 'draft'
+  WHERE sender_user_id = $4 AND recipient_user_id = $5 AND status = 'draft'
   RETURNING id, status, sent_at
-`)
-const insertSentMessage = database.prepare(`
+`,
+  insertSentMessage: `
   INSERT INTO private_messages (
     sender_user_id, recipient_user_id, title, body, closing, status,
     updated_at, sent_at
-  ) VALUES (?, ?, ?, ?, ?, 'sent', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ) VALUES ($1, $2, $3, $4, $5, 'sent', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
   RETURNING id, status, sent_at
-`)
-const listInboxMessages = database.prepare(`
+`,
+  listInboxMessages: `
   SELECT pm.id, pm.sent_at, pm.unlock_at,
          sender.member_id AS sender_member_id,
          sender.display_name AS sender_name,
          sender.division_role AS sender_role
   FROM private_messages pm
   JOIN users sender ON sender.id = pm.sender_user_id
-  WHERE pm.recipient_user_id = ? AND pm.status = 'sent'
+  WHERE pm.recipient_user_id = $1 AND pm.status = 'sent'
   ORDER BY pm.sent_at DESC, pm.id DESC
-`)
-const listOpenInboxMessages = database.prepare(`
+`,
+  listOpenInboxMessages: `
   SELECT pm.id, pm.title, pm.body, pm.closing, pm.sent_at, pm.unlock_at,
          pm.read_at, sender.member_id AS sender_member_id,
          sender.display_name AS sender_name,
          sender.division_role AS sender_role
   FROM private_messages pm
   JOIN users sender ON sender.id = pm.sender_user_id
-  WHERE pm.recipient_user_id = ? AND pm.status = 'sent'
+  WHERE pm.recipient_user_id = $1 AND pm.status = 'sent'
   ORDER BY pm.sent_at DESC, pm.id DESC
-`)
-const findOpenInboxMessage = database.prepare(`
+`,
+  findOpenInboxMessage: `
   SELECT pm.id, pm.title, pm.body, pm.closing, pm.sent_at, pm.unlock_at,
          pm.read_at, sender.member_id AS sender_member_id,
          sender.display_name AS sender_name,
          sender.division_role AS sender_role
   FROM private_messages pm
   JOIN users sender ON sender.id = pm.sender_user_id
-  WHERE pm.id = ? AND pm.recipient_user_id = ? AND pm.status = 'sent'
+  WHERE pm.id = $1 AND pm.recipient_user_id = $2 AND pm.status = 'sent'
   LIMIT 1
-`)
-const markInboxMessageRead = database.prepare(`
+`,
+  markInboxMessageRead: `
   UPDATE private_messages
   SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
-  WHERE id = ? AND recipient_user_id = ? AND status = 'sent'
+  WHERE id = $1 AND recipient_user_id = $2 AND status = 'sent'
   RETURNING id, read_at
-`)
-const markAllInboxMessagesRead = database.prepare(`
+`,
+  markAllInboxMessagesRead: `
   UPDATE private_messages
   SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
-  WHERE recipient_user_id = ? AND status = 'sent' AND read_at IS NULL
-`)
-const adminMemberSummary = database.prepare(`
+  WHERE recipient_user_id = $1 AND status = 'sent' AND read_at IS NULL
+`,
+  adminMemberSummary: `
   SELECT COUNT(*) AS total_members,
-         SUM(CASE WHEN must_change_password = 0 THEN 1 ELSE 0 END) AS secured_accounts,
-         SUM(CASE WHEN last_login_at IS NOT NULL THEN 1 ELSE 0 END) AS members_logged_in
+         COUNT(*) FILTER (WHERE must_change_password = FALSE) AS secured_accounts,
+         COUNT(*) FILTER (WHERE last_login_at IS NOT NULL) AS members_logged_in
   FROM users
-  WHERE account_type = 'member' AND is_active = 1
-`)
-const adminActiveSessions = database.prepare(`
+  WHERE account_type = 'member' AND is_active = TRUE
+`,
+  adminActiveSessions: `
   SELECT COUNT(*) AS total
   FROM sessions s
   JOIN users u ON u.id = s.user_id
-  WHERE s.expires_at > CURRENT_TIMESTAMP AND u.is_active = 1
-`)
-const adminMessageSummary = database.prepare(`
-  SELECT SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent_messages,
-         SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft_messages,
-         SUM(CASE WHEN status = 'sent' AND read_at IS NOT NULL THEN 1 ELSE 0 END) AS read_messages,
+  WHERE s.expires_at > CURRENT_TIMESTAMP AND u.is_active = TRUE
+`,
+  adminMessageSummary: `
+  SELECT COUNT(*) FILTER (WHERE status = 'sent') AS sent_messages,
+         COUNT(*) FILTER (WHERE status = 'draft') AS draft_messages,
+         COUNT(*) FILTER (WHERE status = 'sent' AND read_at IS NOT NULL) AS read_messages,
          COUNT(DISTINCT CASE WHEN status = 'sent' THEN CAST(sender_user_id AS TEXT) || ':' || CAST(recipient_user_id AS TEXT) END) AS completed_pairs,
          COUNT(DISTINCT CASE WHEN status = 'sent' THEN sender_user_id END) AS active_senders,
          COUNT(DISTINCT CASE WHEN status = 'sent' THEN recipient_user_id END) AS reached_recipients
   FROM private_messages
-  WHERE (? IS NULL OR COALESCE(sent_at, updated_at) >= ?)
-`)
-const adminRecentMessages = database.prepare(`
+  WHERE ($1::timestamptz IS NULL OR COALESCE(sent_at, updated_at) >= $1::timestamptz)
+`,
+  adminRecentMessages: `
   SELECT pm.id, pm.sent_at, pm.read_at,
          sender.display_name AS sender_name,
          recipient.display_name AS recipient_name
   FROM private_messages pm
   JOIN users sender ON sender.id = pm.sender_user_id
   JOIN users recipient ON recipient.id = pm.recipient_user_id
-  WHERE pm.status = 'sent' AND (? IS NULL OR pm.sent_at >= ?)
+  WHERE pm.status = 'sent' AND ($1::timestamptz IS NULL OR pm.sent_at >= $1::timestamptz)
   ORDER BY pm.sent_at DESC, pm.id DESC
   LIMIT 7
-`)
-const adminMemberMetrics = database.prepare(`
+`,
+  adminMemberMetrics: `
   SELECT u.member_id, u.username, u.display_name, u.division_role,
          u.must_change_password, u.last_login_at,
          (SELECT COUNT(*) FROM private_messages sent
           WHERE sent.sender_user_id = u.id AND sent.status = 'sent'
-            AND (? IS NULL OR sent.sent_at >= ?)) AS sent_count,
+            AND ($1::timestamptz IS NULL OR sent.sent_at >= $1::timestamptz)) AS sent_count,
          (SELECT COUNT(*) FROM private_messages received
           WHERE received.recipient_user_id = u.id AND received.status = 'sent'
-            AND (? IS NULL OR received.sent_at >= ?)) AS received_count,
+            AND ($1::timestamptz IS NULL OR received.sent_at >= $1::timestamptz)) AS received_count,
          (SELECT COUNT(*) FROM private_messages opened
           WHERE opened.recipient_user_id = u.id AND opened.status = 'sent'
-            AND opened.read_at IS NOT NULL AND (? IS NULL OR opened.sent_at >= ?)) AS read_count
+            AND opened.read_at IS NOT NULL
+            AND ($1::timestamptz IS NULL OR opened.sent_at >= $1::timestamptz)) AS read_count
   FROM users u
-  WHERE u.account_type = 'member' AND u.is_active = 1
+  WHERE u.account_type = 'member' AND u.is_active = TRUE
   ORDER BY u.member_id ASC
-`)
-const adminDivisionSummary = database.prepare(`
+`,
+  adminDivisionSummary: `
   SELECT division_role AS role, COUNT(*) AS total
   FROM users
-  WHERE account_type = 'member' AND is_active = 1
+  WHERE account_type = 'member' AND is_active = TRUE
   GROUP BY division_role
   ORDER BY total DESC, division_role ASC
-`)
-const adminDailyMessages = database.prepare(`
-  SELECT substr(sent_at, 1, 10) AS day, COUNT(*) AS total
+`,
+  adminDailyMessages: `
+  SELECT TO_CHAR(sent_at, 'YYYY-MM-DD') AS day, COUNT(*) AS total
   FROM private_messages
-  WHERE status = 'sent' AND sent_at >= datetime('now', '-6 days')
-  GROUP BY substr(sent_at, 1, 10)
+  WHERE status = 'sent' AND sent_at >= CURRENT_TIMESTAMP - INTERVAL '6 days'
+  GROUP BY TO_CHAR(sent_at, 'YYYY-MM-DD')
   ORDER BY day ASC
-`)
-const findGlobalMessageAccess = database.prepare(`
+`,
+  adminMessageResetImpact: `
+  SELECT COUNT(*) AS total_messages,
+         COUNT(*) FILTER (WHERE status = 'draft') AS draft_messages,
+         COUNT(*) FILTER (WHERE status = 'sent') AS sent_messages,
+         COUNT(*) FILTER (WHERE status = 'sent' AND read_at IS NOT NULL) AS read_messages,
+         COUNT(*) FILTER (WHERE status = 'sent' AND read_at IS NULL) AS unread_messages
+  FROM private_messages
+`,
+  deleteAllPrivateMessages: 'DELETE FROM private_messages',
+  findGlobalMessageAccess: `
   SELECT settings.setting_value, settings.updated_at,
          updater.display_name AS updated_by_name
   FROM app_settings settings
   LEFT JOIN users updater ON updater.id = settings.updated_by_user_id
   WHERE settings.setting_key = 'global_message_access'
   LIMIT 1
-`)
-const updateGlobalMessageAccess = database.prepare(`
+`,
+  updateGlobalMessageAccess: `
   UPDATE app_settings
-  SET setting_value = ?, updated_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
+  SET setting_value = $1, updated_by_user_id = $2, updated_at = CURRENT_TIMESTAMP
   WHERE setting_key = 'global_message_access'
   RETURNING setting_value, updated_at
-`)
-const globalMessageAccessImpact = database.prepare(`
+`,
+  findGlobalMessageReleaseAt: `
+  SELECT setting_value, updated_at
+  FROM app_settings
+  WHERE setting_key = 'global_message_release_at'
+  LIMIT 1
+`,
+  updateGlobalMessageReleaseAt: `
+  UPDATE app_settings
+  SET setting_value = $1, updated_by_user_id = $2, updated_at = CURRENT_TIMESTAMP
+  WHERE setting_key = 'global_message_release_at'
+  RETURNING setting_value, updated_at
+`,
+  globalMessageAccessImpact: `
   SELECT COUNT(*) AS sent_messages,
-         SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread_messages,
+         COUNT(*) FILTER (WHERE read_at IS NULL) AS unread_messages,
          COUNT(DISTINCT recipient_user_id) AS recipients_with_messages
   FROM private_messages
   WHERE status = 'sent'
-`)
-const adminCompletionMembers = database.prepare(`
+`,
+  adminCompletionMembers: `
   SELECT u.member_id, u.display_name, u.division_role,
          (SELECT COUNT(DISTINCT sent.recipient_user_id) FROM private_messages sent
           WHERE sent.sender_user_id = u.id AND sent.status = 'sent'
-            AND (? IS NULL OR sent.sent_at >= ?)) AS completed_recipients,
+            AND ($1::timestamptz IS NULL OR sent.sent_at >= $1::timestamptz)) AS completed_recipients,
          (SELECT COUNT(DISTINCT received.sender_user_id) FROM private_messages received
           WHERE received.recipient_user_id = u.id AND received.status = 'sent'
-            AND (? IS NULL OR received.sent_at >= ?)) AS received_from,
+            AND ($1::timestamptz IS NULL OR received.sent_at >= $1::timestamptz)) AS received_from,
          (SELECT COUNT(*) FROM private_messages drafts
           WHERE drafts.sender_user_id = u.id AND drafts.status = 'draft'
-            AND (? IS NULL OR drafts.updated_at >= ?)) AS draft_count,
+            AND ($1::timestamptz IS NULL OR drafts.updated_at >= $1::timestamptz)) AS draft_count,
          (SELECT COUNT(DISTINCT opened.recipient_user_id) FROM private_messages opened
           WHERE opened.sender_user_id = u.id AND opened.status = 'sent' AND opened.read_at IS NOT NULL
-            AND (? IS NULL OR opened.sent_at >= ?)) AS opened_by_recipients
+            AND ($1::timestamptz IS NULL OR opened.sent_at >= $1::timestamptz)) AS opened_by_recipients
   FROM users u
-  WHERE u.account_type = 'member' AND u.is_active = 1
+  WHERE u.account_type = 'member' AND u.is_active = TRUE
   ORDER BY u.member_id ASC
-`)
-const adminCompletedPairs = database.prepare(`
+`,
+  adminCompletedPairs: `
   SELECT sender.member_id AS sender_member_id,
          recipient.member_id AS recipient_member_id,
          MAX(pm.sent_at) AS sent_at,
-         MAX(CASE WHEN pm.read_at IS NOT NULL THEN 1 ELSE 0 END) AS is_read
+         BOOL_OR(pm.read_at IS NOT NULL) AS is_read
   FROM private_messages pm
   JOIN users sender ON sender.id = pm.sender_user_id
   JOIN users recipient ON recipient.id = pm.recipient_user_id
-  WHERE pm.status = 'sent' AND (? IS NULL OR pm.sent_at >= ?)
+  WHERE pm.status = 'sent' AND ($1::timestamptz IS NULL OR pm.sent_at >= $1::timestamptz)
   GROUP BY sender.member_id, recipient.member_id
   ORDER BY sender.member_id, recipient.member_id
-`)
-const adminCompletionTimeline = database.prepare(`
-  SELECT substr(sent_at, 1, 10) AS day,
+`,
+  adminCompletionTimeline: `
+  SELECT TO_CHAR(sent_at, 'YYYY-MM-DD') AS day,
          COUNT(*) AS messages,
          COUNT(DISTINCT CAST(sender_user_id AS TEXT) || ':' || CAST(recipient_user_id AS TEXT)) AS completed_pairs
   FROM private_messages
-  WHERE status = 'sent' AND (? IS NULL OR sent_at >= ?)
-  GROUP BY substr(sent_at, 1, 10)
+  WHERE status = 'sent' AND ($1::timestamptz IS NULL OR sent_at >= $1::timestamptz)
+  GROUP BY TO_CHAR(sent_at, 'YYYY-MM-DD')
   ORDER BY day ASC
-`)
-const listManagedMembers = database.prepare(`
+`,
+  listManagedMembers: `
   SELECT u.id, u.member_id, u.username, u.display_name, u.division_role,
          u.must_change_password, u.is_active, u.created_at, u.last_login_at,
          (SELECT COUNT(*) FROM private_messages sent
@@ -269,31 +329,47 @@ const listManagedMembers = database.prepare(`
   FROM users u
   WHERE u.account_type = 'member'
   ORDER BY u.member_id ASC
-`)
-const findManagedMember = database.prepare(`
+`,
+  findManagedMember: `
   SELECT id, member_id, username, display_name, division_role,
          must_change_password, is_active, created_at, last_login_at
   FROM users
-  WHERE member_id = ? AND account_type = 'member'
+  WHERE member_id = $1 AND account_type = 'member'
   LIMIT 1
-`)
-const resetManagedMemberPassword = database.prepare(`
+`,
+  resetManagedMemberPassword: `
   UPDATE users
-  SET password_hash = ?, password_salt = ?, must_change_password = 1,
+  SET password_hash = $1, password_salt = $2, must_change_password = TRUE,
       updated_at = CURRENT_TIMESTAMP
-  WHERE id = ? AND account_type = 'member'
-`)
-const updateManagedMemberStatus = database.prepare(`
+  WHERE id = $3 AND account_type = 'member'
+`,
+  updateManagedMemberStatus: `
   UPDATE users
-  SET is_active = ?, updated_at = CURRENT_TIMESTAMP
-  WHERE id = ? AND account_type = 'member'
-`)
-database.exec('DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP')
+  SET is_active = $1, updated_at = CURRENT_TIMESTAMP
+  WHERE id = $2 AND account_type = 'member'
+`,
+}
+const defaultInboxReleaseAt = '2026-08-08T19:00:00+07:00'
 
-const inboxReleaseAt = '2026-08-08T19:00:00+07:00'
+async function inboxAccessState(executor) {
+  const setting = await queryOne(statements.findGlobalMessageAccess, [], executor)
+  const mode = ['locked', 'unlocked', 'scheduled'].includes(setting?.setting_value)
+    ? setting.setting_value
+    : 'locked'
+  const releaseSetting = await queryOne(statements.findGlobalMessageReleaseAt, [], executor)
+  const releaseAt = releaseSetting?.setting_value || defaultInboxReleaseAt
+  const releaseTime = Date.parse(releaseAt)
+  const scheduleReached = Number.isFinite(releaseTime) && Date.now() >= releaseTime
+  const overrideUnlocked = process.env.INBOX_UNLOCK_OVERRIDE === '1'
+  return {
+    mode,
+    releaseAt,
+    unlocked: overrideUnlocked || mode === 'unlocked' || (mode === 'scheduled' && scheduleReached),
+  }
+}
 
-function inboxAccessUnlocked() {
-  return process.env.INBOX_UNLOCK_OVERRIDE === '1' || findGlobalMessageAccess.get()?.setting_value === 'unlocked'
+async function inboxAccessUnlocked() {
+  return (await inboxAccessState()).unlocked
 }
 
 const mimeTypes = {
@@ -333,26 +409,29 @@ async function authenticate(request, response) {
       return sendJson(response, 400, { ok: false, message: 'Username dan kata sandi wajib diisi.' })
     }
 
-    const user = findUser.get(username.trim())
+    const user = await queryOne(statements.findUser, [username.trim()])
     const valid = user && verifyPassword(password, user.password_salt, user.password_hash)
     if (!valid) {
       await new Promise((resolve) => setTimeout(resolve, 180))
       return sendJson(response, 401, { ok: false, message: 'Username atau kata sandi tidak sesuai.' })
     }
 
-    recordLogin.run(user.id)
     const sessionToken = randomBytes(32).toString('base64url')
     const tokenHash = createHash('sha256').update(sessionToken).digest('hex')
     const sessionDuration = remember ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000
-    const expiresAt = new Date(Date.now() + sessionDuration).toISOString().replace('T', ' ').replace('Z', '')
-    createSession.run(user.id, tokenHash, expiresAt)
+    const expiresAt = new Date(Date.now() + sessionDuration).toISOString()
+    await withTransaction(async (client) => {
+      await client.query('DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP')
+      await executeStatement(statements.recordLogin, [user.id], client)
+      await executeStatement(statements.createSession, [user.id, tokenHash, expiresAt], client)
+    })
     const persistentCookie = remember ? '; Max-Age=2592000' : ''
     const secureCookie = process.env.NODE_ENV === 'production' ? '; Secure' : ''
 
     return sendJson(response, 200, {
       ok: true,
       user: {
-        id: user.id,
+        id: normalizeId(user.id),
         memberId: user.member_id,
         username: user.username,
         name: user.display_name,
@@ -380,22 +459,22 @@ function readSessionToken(request) {
   return ''
 }
 
-function authenticatedUser(request) {
+async function authenticatedUser(request) {
   const token = readSessionToken(request)
   if (!token) return null
 
   const tokenHash = createHash('sha256').update(token).digest('hex')
-  return findSession.get(tokenHash) || null
+  return queryOne(statements.findSession, [tokenHash])
 }
 
-function currentSession(request, response) {
-  const user = authenticatedUser(request)
+async function currentSession(request, response) {
+  const user = await authenticatedUser(request)
   if (!user) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
 
   return sendJson(response, 200, {
     ok: true,
     user: {
-      id: user.id,
+      id: normalizeId(user.id),
       memberId: user.member_id,
       username: user.username,
       name: user.display_name,
@@ -406,8 +485,8 @@ function currentSession(request, response) {
   })
 }
 
-function requireAdmin(request, response) {
-  const user = authenticatedUser(request)
+async function requireAdmin(request, response) {
+  const user = await authenticatedUser(request)
   if (!user) {
     sendJson(response, 401, { ok: false, message: 'Sesi admin sudah berakhir. Silakan masuk kembali.' })
     return null
@@ -425,18 +504,33 @@ function adminPeriodDetails(period) {
   return { period: 'all', days: 0 }
 }
 
-function getAdminOverview(request, response) {
-  const admin = requireAdmin(request, response)
+async function getAdminOverview(request, response) {
+  const admin = await requireAdmin(request, response)
   if (!admin) return
 
   const url = new URL(request.url || '/', 'http://localhost')
   const periodDetails = adminPeriodDetails(url.searchParams.get('period'))
   const cutoff = periodDetails.days
-    ? new Date(Date.now() - periodDetails.days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '')
+    ? new Date(Date.now() - periodDetails.days * 24 * 60 * 60 * 1000).toISOString()
     : null
-  const memberSummary = adminMemberSummary.get()
-  const messageSummary = adminMessageSummary.get(cutoff, cutoff)
-  const activeSessions = Number(adminActiveSessions.get().total || 0)
+  const [
+    memberSummary,
+    messageSummary,
+    activeSessionSummary,
+    memberRows,
+    recentRows,
+    divisionRows,
+    dailyRows,
+  ] = await Promise.all([
+    queryOne(statements.adminMemberSummary),
+    queryOne(statements.adminMessageSummary, [cutoff]),
+    queryOne(statements.adminActiveSessions),
+    queryRows(statements.adminMemberMetrics, [cutoff]),
+    queryRows(statements.adminRecentMessages, [cutoff]),
+    queryRows(statements.adminDivisionSummary),
+    queryRows(statements.adminDailyMessages),
+  ])
+  const activeSessions = Number(activeSessionSummary.total || 0)
   const totalMembers = Number(memberSummary.total_members || 0)
   const sentMessages = Number(messageSummary.sent_messages || 0)
   const completedPairs = Number(messageSummary.completed_pairs || 0)
@@ -444,7 +538,7 @@ function getAdminOverview(request, response) {
   const securedAccounts = Number(memberSummary.secured_accounts || 0)
   const messageCapacity = totalMembers * Math.max(totalMembers - 1, 0)
 
-  const members = adminMemberMetrics.all(cutoff, cutoff, cutoff, cutoff, cutoff, cutoff).map((member) => ({
+  const members = memberRows.map((member) => ({
     memberId: member.member_id,
     username: member.username,
     name: member.display_name,
@@ -456,8 +550,8 @@ function getAdminOverview(request, response) {
     readCount: Number(member.read_count || 0),
   }))
 
-  const recentActivity = adminRecentMessages.all(cutoff, cutoff).map((message) => ({
-    id: message.id,
+  const recentActivity = recentRows.map((message) => ({
+    id: normalizeId(message.id),
     senderName: message.sender_name,
     recipientName: message.recipient_name,
     sentAt: message.sent_at,
@@ -489,27 +583,34 @@ function getAdminOverview(request, response) {
     },
     recentActivity,
     members,
-    divisions: adminDivisionSummary.all().map((division) => ({ role: division.role, total: Number(division.total) })),
-    dailyMessages: adminDailyMessages.all().map((day) => ({ day: day.day, total: Number(day.total) })),
+    divisions: divisionRows.map((division) => ({ role: division.role, total: Number(division.total) })),
+    dailyMessages: dailyRows.map((day) => ({ day: day.day, total: Number(day.total) })),
     privacy: 'Dashboard hanya menampilkan metadata pesan. Isi pesan privat tidak pernah disertakan.',
   })
 }
 
-function getMessageCompletionProgress(request, response) {
-  const admin = requireAdmin(request, response)
+async function getMessageCompletionProgress(request, response) {
+  const admin = await requireAdmin(request, response)
   if (!admin) return
 
   const url = new URL(request.url || '/', 'http://localhost')
   const periodDetails = adminPeriodDetails(url.searchParams.get('period'))
   const cutoff = periodDetails.days
-    ? new Date(Date.now() - periodDetails.days * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '')
+    ? new Date(Date.now() - periodDetails.days * 24 * 60 * 60 * 1000).toISOString()
     : null
-  const totalMembers = Number(adminMemberSummary.get().total_members || 0)
+  const [memberSummary, summary, completionRows, pairRows, timelineRows, accessUnlocked] = await Promise.all([
+    queryOne(statements.adminMemberSummary),
+    queryOne(statements.adminMessageSummary, [cutoff]),
+    queryRows(statements.adminCompletionMembers, [cutoff]),
+    queryRows(statements.adminCompletedPairs, [cutoff]),
+    queryRows(statements.adminCompletionTimeline, [cutoff]),
+    inboxAccessUnlocked(),
+  ])
+  const totalMembers = Number(memberSummary.total_members || 0)
   const targetPerMember = Math.max(totalMembers - 1, 0)
   const targetPairs = totalMembers * targetPerMember
-  const summary = adminMessageSummary.get(cutoff, cutoff)
   const completedPairs = Number(summary.completed_pairs || 0)
-  const members = adminCompletionMembers.all(cutoff, cutoff, cutoff, cutoff, cutoff, cutoff, cutoff, cutoff).map((member) => {
+  const members = completionRows.map((member) => {
     const completedRecipients = Number(member.completed_recipients || 0)
     return {
       memberId: member.member_id,
@@ -536,7 +637,7 @@ function getMessageCompletionProgress(request, response) {
     ok: true,
     period: periodDetails.period,
     generatedAt: new Date().toISOString(),
-    accessUnlocked: inboxAccessUnlocked(),
+    accessUnlocked,
     statistics: {
       totalMembers,
       targetPerMember,
@@ -555,13 +656,13 @@ function getMessageCompletionProgress(request, response) {
       ...division,
       progress: division.targetPairs ? Math.round((division.completedPairs / division.targetPairs) * 100) : 0,
     })).sort((left, right) => right.progress - left.progress || left.role.localeCompare(right.role)),
-    pairs: adminCompletedPairs.all(cutoff, cutoff).map((pair) => ({
+    pairs: pairRows.map((pair) => ({
       senderMemberId: pair.sender_member_id,
       recipientMemberId: pair.recipient_member_id,
       sentAt: pair.sent_at,
       isRead: Boolean(pair.is_read),
     })),
-    timeline: adminCompletionTimeline.all(cutoff, cutoff).map((item) => ({
+    timeline: timelineRows.map((item) => ({
       day: item.day,
       messages: Number(item.messages),
       completedPairs: Number(item.completed_pairs),
@@ -586,10 +687,10 @@ function serializeManagedMember(member) {
   }
 }
 
-function getManagedMembers(request, response) {
-  const admin = requireAdmin(request, response)
+async function getManagedMembers(request, response) {
+  const admin = await requireAdmin(request, response)
   if (!admin) return
-  const members = listManagedMembers.all().map(serializeManagedMember)
+  const members = (await queryRows(statements.listManagedMembers)).map(serializeManagedMember)
   return sendJson(response, 200, {
     ok: true,
     generatedAt: new Date().toISOString(),
@@ -614,27 +715,25 @@ function temporaryPassword() {
 }
 
 async function resetMemberPassword(request, response, memberId) {
-  const admin = requireAdmin(request, response)
+  const admin = await requireAdmin(request, response)
   if (!admin) return
   if (!Number.isInteger(memberId)) return sendJson(response, 400, { ok: false, message: 'Anggota tidak valid.' })
   try {
     const payload = await readJson(request)
     if (payload.confirmation !== 'RESET KATA SANDI') return sendJson(response, 422, { ok: false, message: 'Konfirmasi reset kata sandi tidak sesuai.' })
-    const member = findManagedMember.get(memberId)
+    const member = await queryOne(statements.findManagedMember, [memberId])
     if (!member) return sendJson(response, 404, { ok: false, message: 'Akun anggota tidak ditemukan.' })
 
     const password = temporaryPassword()
     const nextPassword = hashPassword(password)
-    database.exec('BEGIN IMMEDIATE')
-    let revokedSessions = 0
-    try {
-      resetManagedMemberPassword.run(nextPassword.hash, nextPassword.salt, member.id)
-      revokedSessions = Number(deleteAllUserSessions.run(member.id).changes)
-      database.exec('COMMIT')
-    } catch (error) {
-      database.exec('ROLLBACK')
-      throw error
-    }
+    const revokedSessions = await withTransaction(async (client) => {
+      await executeStatement(
+        statements.resetManagedMemberPassword,
+        [nextPassword.hash, nextPassword.salt, member.id],
+        client,
+      )
+      return executeStatement(statements.deleteAllUserSessions, [member.id], client)
+    })
 
     return sendJson(response, 200, {
       ok: true,
@@ -652,7 +751,7 @@ async function resetMemberPassword(request, response, memberId) {
 }
 
 async function changeManagedMemberStatus(request, response, memberId) {
-  const admin = requireAdmin(request, response)
+  const admin = await requireAdmin(request, response)
   if (!admin) return
   if (!Number.isInteger(memberId)) return sendJson(response, 400, { ok: false, message: 'Anggota tidak valid.' })
 
@@ -662,19 +761,15 @@ async function changeManagedMemberStatus(request, response, memberId) {
     const expectedConfirmation = payload.active ? 'AKTIFKAN ANGGOTA' : 'NONAKTIFKAN ANGGOTA'
     if (payload.confirmation !== expectedConfirmation) return sendJson(response, 422, { ok: false, message: 'Konfirmasi perubahan status tidak sesuai.' })
 
-    const member = findManagedMember.get(memberId)
+    const member = await queryOne(statements.findManagedMember, [memberId])
     if (!member) return sendJson(response, 404, { ok: false, message: 'Akun anggota tidak ditemukan.' })
     let revokedSessions = 0
     if (Boolean(member.is_active) !== payload.active) {
-      database.exec('BEGIN IMMEDIATE')
-      try {
-        updateManagedMemberStatus.run(payload.active ? 1 : 0, member.id)
-        if (!payload.active) revokedSessions = Number(deleteAllUserSessions.run(member.id).changes)
-        database.exec('COMMIT')
-      } catch (error) {
-        database.exec('ROLLBACK')
-        throw error
-      }
+      revokedSessions = await withTransaction(async (client) => {
+        await executeStatement(statements.updateManagedMemberStatus, [payload.active, member.id], client)
+        if (payload.active) return 0
+        return executeStatement(statements.deleteAllUserSessions, [member.id], client)
+      })
     }
 
     return sendJson(response, 200, {
@@ -691,33 +786,76 @@ async function changeManagedMemberStatus(request, response, memberId) {
   }
 }
 
-function serializeGlobalMessageAccess() {
-  const setting = findGlobalMessageAccess.get()
-  const impact = globalMessageAccessImpact.get()
-  const unlocked = setting?.setting_value === 'unlocked'
+async function resetAllPrivateMessages(request, response) {
+  const admin = await requireAdmin(request, response)
+  if (!admin) return
+
+  try {
+    const payload = await readJson(request)
+    if (payload.confirmation !== 'HAPUS SEMUA PESAN') {
+      return sendJson(response, 422, { ok: false, message: 'Konfirmasi penghapusan semua pesan tidak sesuai.' })
+    }
+
+    const deleted = await withTransaction(async (client) => {
+      const impact = await queryOne(statements.adminMessageResetImpact, [], client)
+      const total = await executeStatement(statements.deleteAllPrivateMessages, [], client)
+      return {
+        total,
+        drafts: Number(impact.total_messages ? impact.draft_messages : 0),
+        sent: Number(impact.total_messages ? impact.sent_messages : 0),
+        read: Number(impact.total_messages ? impact.read_messages : 0),
+        unread: Number(impact.total_messages ? impact.unread_messages : 0),
+      }
+    })
+
+    return sendJson(response, 200, {
+      ok: true,
+      changed: deleted.total > 0,
+      message: deleted.total > 0
+        ? 'Semua pesan dan draf pengujian berhasil dihapus.'
+        : 'Penyimpanan pesan sudah kosong.',
+      deleted,
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Semua pesan belum dapat dihapus.' })
+  }
+}
+
+async function serializeGlobalMessageAccess() {
+  const [setting, impact, accessState, memberSummary] = await Promise.all([
+    queryOne(statements.findGlobalMessageAccess),
+    queryOne(statements.globalMessageAccessImpact),
+    inboxAccessState(),
+    queryOne(statements.adminMemberSummary),
+  ])
   return {
-    unlocked,
-    status: unlocked ? 'unlocked' : 'locked',
+    unlocked: accessState.unlocked,
+    status: accessState.unlocked ? 'unlocked' : 'locked',
+    mode: accessState.mode,
+    scheduled: accessState.mode === 'scheduled',
     updatedAt: setting?.updated_at || null,
     updatedBy: setting?.updated_by_name || 'Database seeder',
-    plannedReleaseAt: inboxReleaseAt,
+    plannedReleaseAt: accessState.releaseAt,
     impact: {
       sentMessages: Number(impact.sent_messages || 0),
       unreadMessages: Number(impact.unread_messages || 0),
       recipientsWithMessages: Number(impact.recipients_with_messages || 0),
-      totalMembers: Number(adminMemberSummary.get().total_members || 0),
+      totalMembers: Number(memberSummary.total_members || 0),
     },
   }
 }
 
-function getGlobalMessageAccess(request, response) {
-  const admin = requireAdmin(request, response)
+async function getGlobalMessageAccess(request, response) {
+  const admin = await requireAdmin(request, response)
   if (!admin) return
-  return sendJson(response, 200, { ok: true, access: serializeGlobalMessageAccess() })
+  return sendJson(response, 200, { ok: true, access: await serializeGlobalMessageAccess() })
 }
 
 async function changeGlobalMessageAccess(request, response) {
-  const admin = requireAdmin(request, response)
+  const admin = await requireAdmin(request, response)
   if (!admin) return
 
   try {
@@ -731,22 +869,64 @@ async function changeGlobalMessageAccess(request, response) {
       return sendJson(response, 422, { ok: false, message: 'Konfirmasi perubahan akses tidak sesuai.' })
     }
 
-    const current = findGlobalMessageAccess.get()?.setting_value === 'unlocked'
-    if (current !== payload.unlocked) {
-      updateGlobalMessageAccess.get(payload.unlocked ? 'unlocked' : 'locked', admin.id)
+    const nextMode = payload.unlocked ? 'unlocked' : 'locked'
+    const currentMode = (await queryOne(statements.findGlobalMessageAccess))?.setting_value || 'locked'
+    if (currentMode !== nextMode) {
+      await queryOne(statements.updateGlobalMessageAccess, [nextMode, admin.id])
     }
 
     return sendJson(response, 200, {
       ok: true,
-      changed: current !== payload.unlocked,
+      changed: currentMode !== nextMode,
       message: payload.unlocked ? 'Akses seluruh surat berhasil dibuka.' : 'Akses seluruh surat berhasil dikunci.',
-      access: serializeGlobalMessageAccess(),
+      access: await serializeGlobalMessageAccess(),
     })
   } catch (error) {
     if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
     if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
     console.error(error)
     return sendJson(response, 500, { ok: false, message: 'Status akses belum dapat diperbarui.' })
+  }
+}
+
+async function scheduleGlobalMessageAccess(request, response) {
+  const admin = await requireAdmin(request, response)
+  if (!admin) return
+
+  try {
+    const payload = await readJson(request)
+    if (typeof payload.releaseAt !== 'string' || !payload.releaseAt.trim()) {
+      return sendJson(response, 422, { ok: false, message: 'Tanggal dan waktu pembukaan wajib diisi.' })
+    }
+    if (payload.confirmation !== 'JADWALKAN PEMBUKAAN') {
+      return sendJson(response, 422, { ok: false, message: 'Konfirmasi jadwal pembukaan tidak sesuai.' })
+    }
+
+    const releaseTime = Date.parse(payload.releaseAt)
+    if (!Number.isFinite(releaseTime)) {
+      return sendJson(response, 422, { ok: false, message: 'Tanggal dan waktu pembukaan tidak valid.' })
+    }
+    if (releaseTime <= Date.now() + 60_000) {
+      return sendJson(response, 422, { ok: false, message: 'Waktu pembukaan harus setidaknya satu menit dari sekarang.' })
+    }
+
+    const normalizedReleaseAt = new Date(releaseTime).toISOString()
+    await withTransaction(async (client) => {
+      await queryOne(statements.updateGlobalMessageReleaseAt, [normalizedReleaseAt, admin.id], client)
+      await queryOne(statements.updateGlobalMessageAccess, ['scheduled', admin.id], client)
+    })
+
+    return sendJson(response, 200, {
+      ok: true,
+      changed: true,
+      message: 'Jadwal pembukaan berhasil disimpan. Inbox akan terbuka otomatis pada waktunya.',
+      access: await serializeGlobalMessageAccess(),
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError) return sendJson(response, 400, { ok: false, message: 'Format permintaan tidak valid.' })
+    if (error instanceof Error && error.message === 'PAYLOAD_TOO_LARGE') return sendJson(response, 413, { ok: false, message: 'Permintaan terlalu besar.' })
+    console.error(error)
+    return sendJson(response, 500, { ok: false, message: 'Jadwal pembukaan belum dapat disimpan.' })
   }
 }
 
@@ -766,7 +946,7 @@ function passwordValidationMessage(password, username) {
 }
 
 async function changePassword(request, response) {
-  const sessionUser = authenticatedUser(request)
+  const sessionUser = await authenticatedUser(request)
   if (!sessionUser) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
 
   try {
@@ -785,7 +965,7 @@ async function changePassword(request, response) {
     const validationMessage = passwordValidationMessage(newPassword, sessionUser.username)
     if (validationMessage) return sendJson(response, 422, { ok: false, message: validationMessage })
 
-    const passwordUser = findPasswordUserById.get(sessionUser.id)
+    const passwordUser = await queryOne(statements.findPasswordUserById, [sessionUser.id])
     if (!passwordUser || !verifyPassword(currentPassword, passwordUser.password_salt, passwordUser.password_hash)) {
       await new Promise((resolve) => setTimeout(resolve, 180))
       return sendJson(response, 422, { ok: false, message: 'Kata sandi saat ini tidak sesuai.' })
@@ -796,16 +976,14 @@ async function changePassword(request, response) {
 
     const nextPassword = hashPassword(newPassword)
     const tokenHash = createHash('sha256').update(readSessionToken(request)).digest('hex')
-    database.exec('BEGIN IMMEDIATE')
-    let revokedSessions = 0
-    try {
-      updateUserPassword.run(nextPassword.hash, nextPassword.salt, sessionUser.id)
-      revokedSessions = Number(deleteOtherUserSessions.run(sessionUser.id, tokenHash).changes)
-      database.exec('COMMIT')
-    } catch (error) {
-      database.exec('ROLLBACK')
-      throw error
-    }
+    const revokedSessions = await withTransaction(async (client) => {
+      await executeStatement(
+        statements.updateUserPassword,
+        [nextPassword.hash, nextPassword.salt, sessionUser.id],
+        client,
+      )
+      return executeStatement(statements.deleteOtherUserSessions, [sessionUser.id, tokenHash], client)
+    })
 
     return sendJson(response, 200, {
       ok: true,
@@ -821,8 +999,8 @@ async function changePassword(request, response) {
   }
 }
 
-function messageParticipants(request, response, recipientMemberId) {
-  const sender = authenticatedUser(request)
+async function messageParticipants(request, response, recipientMemberId) {
+  const sender = await authenticatedUser(request)
   if (!sender) {
     sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
     return null
@@ -836,12 +1014,12 @@ function messageParticipants(request, response, recipientMemberId) {
     return null
   }
 
-  const recipient = findRecipientByMemberId.get(recipientMemberId)
+  const recipient = await queryOne(statements.findRecipientByMemberId, [recipientMemberId])
   if (!recipient) {
     sendJson(response, 404, { ok: false, message: 'Anggota penerima tidak ditemukan.' })
     return null
   }
-  if (recipient.id === sender.id) {
+  if (idsMatch(recipient.id, sender.id)) {
     sendJson(response, 400, { ok: false, message: 'Kamu tidak dapat mengirim pesan kepada diri sendiri.' })
     return null
   }
@@ -863,7 +1041,7 @@ function messageFields(payload) {
 function serializeDraft(row, recipientMemberId) {
   if (!row) return null
   return {
-    id: row.id,
+    id: normalizeId(row.id),
     recipientMemberId,
     title: row.title,
     body: row.body,
@@ -873,13 +1051,16 @@ function serializeDraft(row, recipientMemberId) {
   }
 }
 
-function getMessageDraft(request, response) {
+async function getMessageDraft(request, response) {
   const url = new URL(request.url || '/', 'http://localhost')
   const recipientMemberId = Number(url.searchParams.get('recipientMemberId'))
-  const participants = messageParticipants(request, response, recipientMemberId)
+  const participants = await messageParticipants(request, response, recipientMemberId)
   if (!participants) return
 
-  const draft = findDraft.get(participants.sender.id, participants.recipient.id)
+  const draft = await queryOne(
+    statements.findDraft,
+    [participants.sender.id, participants.recipient.id],
+  )
   return sendJson(response, 200, { ok: true, draft: serializeDraft(draft, recipientMemberId) })
 }
 
@@ -887,23 +1068,29 @@ async function saveMessageDraft(request, response) {
   try {
     const payload = await readJson(request)
     const recipientMemberId = Number(payload.recipientMemberId)
-    const participants = messageParticipants(request, response, recipientMemberId)
+    const participants = await messageParticipants(request, response, recipientMemberId)
     if (!participants) return
 
     const fields = messageFields(payload)
     if (fields.error) return sendJson(response, 422, { ok: false, message: fields.error })
 
     if (!fields.title && !fields.body.trim() && !fields.closing) {
-      deleteDraft.run(participants.sender.id, participants.recipient.id)
+      await executeStatement(
+        statements.deleteDraft,
+        [participants.sender.id, participants.recipient.id],
+      )
       return sendJson(response, 200, { ok: true, draft: null, deleted: true })
     }
 
-    const draft = upsertDraft.get(
-      participants.sender.id,
-      participants.recipient.id,
-      fields.title,
-      fields.body,
-      fields.closing,
+    const draft = await queryOne(
+      statements.upsertDraft,
+      [
+        participants.sender.id,
+        participants.recipient.id,
+        fields.title,
+        fields.body,
+        fields.closing,
+      ],
     )
     return sendJson(response, 200, { ok: true, draft: serializeDraft(draft, recipientMemberId) })
   } catch (error) {
@@ -918,7 +1105,7 @@ async function sendPrivateMessage(request, response) {
   try {
     const payload = await readJson(request)
     const recipientMemberId = Number(payload.recipientMemberId)
-    const participants = messageParticipants(request, response, recipientMemberId)
+    const participants = await messageParticipants(request, response, recipientMemberId)
     if (!participants) return
 
     const fields = messageFields(payload)
@@ -928,35 +1115,37 @@ async function sendPrivateMessage(request, response) {
       return sendJson(response, 422, { ok: false, message: 'Isi pesan minimal 20 karakter agar kenanganmu tersampaikan dengan utuh.' })
     }
 
-    database.exec('BEGIN IMMEDIATE')
-    let message
-    try {
-      message = sendExistingDraft.get(
-        fields.title,
-        trimmedBody,
-        fields.closing,
-        participants.sender.id,
-        participants.recipient.id,
+    const message = await withTransaction(async (client) => {
+      const existingDraft = await queryOne(
+        statements.sendExistingDraft,
+        [
+          fields.title,
+          trimmedBody,
+          fields.closing,
+          participants.sender.id,
+          participants.recipient.id,
+        ],
+        client,
       )
-      if (!message) {
-        message = insertSentMessage.get(
+      if (existingDraft) return existingDraft
+
+      return queryOne(
+        statements.insertSentMessage,
+        [
           participants.sender.id,
           participants.recipient.id,
           fields.title,
           trimmedBody,
           fields.closing,
-        )
-      }
-      database.exec('COMMIT')
-    } catch (error) {
-      database.exec('ROLLBACK')
-      throw error
-    }
+        ],
+        client,
+      )
+    })
 
     return sendJson(response, 201, {
       ok: true,
       message: {
-        id: message.id,
+        id: normalizeId(message.id),
         status: message.status,
         recipientMemberId,
         sentAt: message.sent_at,
@@ -970,17 +1159,20 @@ async function sendPrivateMessage(request, response) {
   }
 }
 
-function getPrivateInbox(request, response) {
-  const recipient = authenticatedUser(request)
+async function getPrivateInbox(request, response) {
+  const recipient = await authenticatedUser(request)
   if (!recipient) return sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
   if (!recipient.member_id) return sendJson(response, 403, { ok: false, message: 'Inbox privat hanya tersedia untuk akun anggota.' })
 
-  const accessUnlocked = inboxAccessUnlocked()
-  const messages = listInboxMessages.all(recipient.id).map((message) => ({
-    id: message.id,
+  const [accessState, inboxRows] = await Promise.all([
+    inboxAccessState(),
+    queryRows(statements.listInboxMessages, [recipient.id]),
+  ])
+  const messages = inboxRows.map((message) => ({
+    id: normalizeId(message.id),
     sentAt: message.sent_at,
-    unlockAt: message.unlock_at,
-    locked: !accessUnlocked,
+    unlockAt: accessState.releaseAt,
+    locked: !accessState.unlocked,
     sender: {
       memberId: message.sender_member_id,
       name: message.sender_name,
@@ -990,14 +1182,14 @@ function getPrivateInbox(request, response) {
 
   return sendJson(response, 200, {
     ok: true,
-    releaseAt: inboxReleaseAt,
-    accessUnlocked,
+    releaseAt: accessState.releaseAt,
+    accessUnlocked: accessState.unlocked,
     messages,
   })
 }
 
-function requireOpenInbox(request, response) {
-  const recipient = authenticatedUser(request)
+async function requireOpenInbox(request, response) {
+  const recipient = await authenticatedUser(request)
   if (!recipient) {
     sendJson(response, 401, { ok: false, message: 'Sesi sudah berakhir. Silakan masuk kembali.' })
     return null
@@ -1006,24 +1198,28 @@ function requireOpenInbox(request, response) {
     sendJson(response, 403, { ok: false, message: 'Inbox privat hanya tersedia untuk akun anggota.' })
     return null
   }
-  if (!inboxAccessUnlocked()) {
-    sendJson(response, 423, { ok: false, message: 'Surat masih tersegel sampai malam perpisahan.', releaseAt: inboxReleaseAt })
+  const accessState = await inboxAccessState()
+  if (!accessState.unlocked) {
+    sendJson(response, 423, { ok: false, message: 'Surat masih tersegel sampai waktu pembukaan yang ditentukan.', releaseAt: accessState.releaseAt })
     return null
   }
-  return recipient
+  return { recipient, accessState }
 }
 
-function getOpenPrivateInbox(request, response) {
-  const recipient = requireOpenInbox(request, response)
-  if (!recipient) return
+async function getOpenPrivateInbox(request, response) {
+  const context = await requireOpenInbox(request, response)
+  if (!context) return
+  const { recipient, accessState } = context
+  const releaseAt = accessState.releaseAt
 
-  const messages = listOpenInboxMessages.all(recipient.id).map((message) => ({
-    id: message.id,
+  const inboxRows = await queryRows(statements.listOpenInboxMessages, [recipient.id])
+  const messages = inboxRows.map((message) => ({
+    id: normalizeId(message.id),
     title: message.title,
     body: message.body,
     closing: message.closing,
     sentAt: message.sent_at,
-    unlockAt: message.unlock_at,
+    unlockAt: releaseAt,
     readAt: message.read_at,
     isRead: Boolean(message.read_at),
     sender: {
@@ -1033,17 +1229,17 @@ function getOpenPrivateInbox(request, response) {
     },
   }))
 
-  return sendJson(response, 200, { ok: true, releaseAt: inboxReleaseAt, messages })
+  return sendJson(response, 200, { ok: true, releaseAt, messages })
 }
 
-function serializeOpenMessage(message) {
+function serializeOpenMessage(message, releaseAt) {
   return {
-    id: message.id,
+    id: normalizeId(message.id),
     title: message.title,
     body: message.body,
     closing: message.closing,
     sentAt: message.sent_at,
-    unlockAt: message.unlock_at,
+    unlockAt: releaseAt,
     readAt: message.read_at,
     isRead: Boolean(message.read_at),
     sender: {
@@ -1054,36 +1250,46 @@ function serializeOpenMessage(message) {
   }
 }
 
-function getOpenPrivateMessage(request, response, messageId) {
-  const recipient = requireOpenInbox(request, response)
-  if (!recipient) return
+async function getOpenPrivateMessage(request, response, messageId) {
+  const context = await requireOpenInbox(request, response)
+  if (!context) return
+  const { recipient, accessState } = context
   if (!Number.isInteger(messageId)) return sendJson(response, 400, { ok: false, message: 'Surat tidak valid.' })
 
-  const message = findOpenInboxMessage.get(messageId, recipient.id)
+  const message = await queryOne(statements.findOpenInboxMessage, [messageId, recipient.id])
   if (!message) return sendJson(response, 404, { ok: false, message: 'Surat tidak ditemukan di inbox-mu.' })
-  return sendJson(response, 200, { ok: true, message: serializeOpenMessage(message) })
+  return sendJson(response, 200, { ok: true, message: serializeOpenMessage(message, accessState.releaseAt) })
 }
 
-function markPrivateMessageRead(request, response, messageId) {
-  const recipient = requireOpenInbox(request, response)
-  if (!recipient) return
+async function markPrivateMessageRead(request, response, messageId) {
+  const context = await requireOpenInbox(request, response)
+  if (!context) return
+  const { recipient } = context
   if (!Number.isInteger(messageId)) return sendJson(response, 400, { ok: false, message: 'Surat tidak valid.' })
 
-  const message = markInboxMessageRead.get(messageId, recipient.id)
+  const message = await queryOne(statements.markInboxMessageRead, [messageId, recipient.id])
   if (!message) return sendJson(response, 404, { ok: false, message: 'Surat tidak ditemukan di inbox-mu.' })
-  return sendJson(response, 200, { ok: true, message: { id: message.id, readAt: message.read_at, isRead: true } })
+  return sendJson(response, 200, {
+    ok: true,
+    message: { id: normalizeId(message.id), readAt: message.read_at, isRead: true },
+  })
 }
 
-function markAllPrivateMessagesRead(request, response) {
-  const recipient = requireOpenInbox(request, response)
-  if (!recipient) return
-  const result = markAllInboxMessagesRead.run(recipient.id)
-  return sendJson(response, 200, { ok: true, updated: Number(result.changes) })
+async function markAllPrivateMessagesRead(request, response) {
+  const context = await requireOpenInbox(request, response)
+  if (!context) return
+  const updated = await executeStatement(statements.markAllInboxMessagesRead, [context.recipient.id])
+  return sendJson(response, 200, { ok: true, updated })
 }
 
-function logout(request, response) {
+async function logout(request, response) {
   const token = readSessionToken(request)
-  if (token) deleteSession.run(createHash('sha256').update(token).digest('hex'))
+  if (token) {
+    await executeStatement(
+      statements.deleteSession,
+      [createHash('sha256').update(token).digest('hex')],
+    )
+  }
   return sendJson(response, 200, { ok: true }, {
     'Set-Cookie': 'pulupulu_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
   })
@@ -1113,85 +1319,117 @@ function serveStatic(request, response) {
   createReadStream(filePath).pipe(response)
 }
 
-const server = createServer(async (request, response) => {
-  if (request.method === 'POST' && request.url?.startsWith('/api/auth/login')) {
-    return authenticate(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/auth/session')) {
-    return currentSession(request, response)
-  }
-  if (request.method === 'POST' && request.url?.startsWith('/api/auth/logout')) {
-    return logout(request, response)
-  }
-  if (request.method === 'PATCH' && request.url?.startsWith('/api/account/password')) {
-    return changePassword(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/admin/overview')) {
-    return getAdminOverview(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/admin/message-access')) {
-    return getGlobalMessageAccess(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/admin/message-progress')) {
-    return getMessageCompletionProgress(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/admin/members')) {
-    return getManagedMembers(request, response)
-  }
-  const resetMemberPasswordMatch = request.url?.match(/^\/api\/admin\/members\/(\d+)\/reset-password(?:\?.*)?$/)
-  if (request.method === 'POST' && resetMemberPasswordMatch) {
-    return resetMemberPassword(request, response, Number(resetMemberPasswordMatch[1]))
-  }
-  const memberStatusMatch = request.url?.match(/^\/api\/admin\/members\/(\d+)\/status(?:\?.*)?$/)
-  if (request.method === 'PATCH' && memberStatusMatch) {
-    return changeManagedMemberStatus(request, response, Number(memberStatusMatch[1]))
-  }
-  if (request.method === 'PATCH' && request.url?.startsWith('/api/admin/message-access')) {
-    return changeGlobalMessageAccess(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/messages/draft')) {
-    return getMessageDraft(request, response)
-  }
-  if (request.method === 'PUT' && request.url?.startsWith('/api/messages/draft')) {
-    return saveMessageDraft(request, response)
-  }
-  if (request.method === 'POST' && request.url?.startsWith('/api/messages/send')) {
-    return sendPrivateMessage(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/messages/inbox')) {
-    return getPrivateInbox(request, response)
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/messages/open-inbox')) {
-    return getOpenPrivateInbox(request, response)
-  }
-  if (request.method === 'PATCH' && request.url?.startsWith('/api/messages/read-all')) {
-    return markAllPrivateMessagesRead(request, response)
-  }
-  const openMessageMatch = request.url?.match(/^\/api\/messages\/(\d+)(?:\?.*)?$/)
-  if (request.method === 'GET' && openMessageMatch) {
-    return getOpenPrivateMessage(request, response, Number(openMessageMatch[1]))
-  }
-  const readMessageMatch = request.url?.match(/^\/api\/messages\/(\d+)\/read(?:\?.*)?$/)
-  if (request.method === 'PATCH' && readMessageMatch) {
-    return markPrivateMessageRead(request, response, Number(readMessageMatch[1]))
-  }
-  if (request.method === 'GET' && request.url?.startsWith('/api/health')) {
-    return sendJson(response, 200, { ok: true, database: databasePath })
-  }
-  if (request.method === 'GET' || request.method === 'HEAD') return serveStatic(request, response)
-  return sendJson(response, 405, { ok: false, message: 'Metode tidak diizinkan.' })
-})
+export async function handleRequest(request, response) {
+  try {
+    const requestUrl = new URL(request.url || '/', 'http://localhost')
+    const { pathname } = requestUrl
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`Pulupulu server ready at http://127.0.0.1:${port}`)
-})
+    if (request.method === 'POST' && pathname === '/api/auth/login') {
+      return await authenticate(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/auth/session') {
+      return await currentSession(request, response)
+    }
+    if (request.method === 'POST' && pathname === '/api/auth/logout') {
+      return await logout(request, response)
+    }
+    if (request.method === 'PATCH' && pathname === '/api/account/password') {
+      return await changePassword(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/admin/overview') {
+      return await getAdminOverview(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/admin/message-access') {
+      return await getGlobalMessageAccess(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/admin/message-progress') {
+      return await getMessageCompletionProgress(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/admin/members') {
+      return await getManagedMembers(request, response)
+    }
+    if (request.method === 'POST' && pathname === '/api/admin/messages/reset') {
+      return await resetAllPrivateMessages(request, response)
+    }
 
-function shutdown() {
-  server.close(() => {
-    database.close()
-    process.exit(0)
-  })
+    const resetMemberPasswordMatch = pathname.match(/^\/api\/admin\/members\/(\d+)\/reset-password$/)
+    if (request.method === 'POST' && resetMemberPasswordMatch) {
+      return await resetMemberPassword(request, response, Number(resetMemberPasswordMatch[1]))
+    }
+
+    const memberStatusMatch = pathname.match(/^\/api\/admin\/members\/(\d+)\/status$/)
+    if (request.method === 'PATCH' && memberStatusMatch) {
+      return await changeManagedMemberStatus(request, response, Number(memberStatusMatch[1]))
+    }
+    if (request.method === 'PATCH' && pathname === '/api/admin/message-access/schedule') {
+      return await scheduleGlobalMessageAccess(request, response)
+    }
+    if (request.method === 'PATCH' && pathname === '/api/admin/message-access') {
+      return await changeGlobalMessageAccess(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/messages/draft') {
+      return await getMessageDraft(request, response)
+    }
+    if (request.method === 'PUT' && pathname === '/api/messages/draft') {
+      return await saveMessageDraft(request, response)
+    }
+    if (request.method === 'POST' && pathname === '/api/messages/send') {
+      return await sendPrivateMessage(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/messages/inbox') {
+      return await getPrivateInbox(request, response)
+    }
+    if (request.method === 'GET' && pathname === '/api/messages/open-inbox') {
+      return await getOpenPrivateInbox(request, response)
+    }
+    if (request.method === 'PATCH' && pathname === '/api/messages/read-all') {
+      return await markAllPrivateMessagesRead(request, response)
+    }
+
+    const openMessageMatch = pathname.match(/^\/api\/messages\/(\d+)$/)
+    if (request.method === 'GET' && openMessageMatch) {
+      return await getOpenPrivateMessage(request, response, Number(openMessageMatch[1]))
+    }
+
+    const readMessageMatch = pathname.match(/^\/api\/messages\/(\d+)\/read$/)
+    if (request.method === 'PATCH' && readMessageMatch) {
+      return await markPrivateMessageRead(request, response, Number(readMessageMatch[1]))
+    }
+    if (request.method === 'GET' && pathname === '/api/health') {
+      await queryOne('SELECT 1 AS ok')
+      return sendJson(response, 200, { ok: true, database: databaseProvider })
+    }
+    if (pathname === '/api' || pathname.startsWith('/api/')) {
+      return sendJson(response, 404, { ok: false, message: 'Endpoint API tidak ditemukan.' })
+    }
+    if (request.method === 'GET' || request.method === 'HEAD') return serveStatic(request, response)
+    return sendJson(response, 405, { ok: false, message: 'Metode tidak diizinkan.' })
+  } catch (error) {
+    console.error(error)
+    if (!response.headersSent) {
+      return sendJson(response, 500, { ok: false, message: 'Terjadi kesalahan pada server.' })
+    }
+    if (!response.writableEnded) response.end()
+  }
 }
 
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+const modulePath = fileURLToPath(import.meta.url)
+const isDirectExecution = process.argv[1] && resolve(process.argv[1]) === resolve(modulePath)
+
+if (isDirectExecution) {
+  const server = createServer(handleRequest)
+
+  server.listen(port, host, () => {
+    console.log(`Pulupulu server ready at http://${host}:${port}`)
+  })
+
+  const shutdown = () => {
+    server.close(async () => {
+      await closeDatabase()
+      process.exit(0)
+    })
+  }
+
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+}
