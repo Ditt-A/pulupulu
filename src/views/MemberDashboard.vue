@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
-import { ArrowRight, CalendarDays, ChevronRight, Heart, Image, LockKeyhole, MailOpen, MapPin, Sparkles, Waves } from '@lucide/vue'
+import { ArrowRight, CalendarDays, ChevronRight, Heart, Image, LockKeyhole, MailOpen, MapPin, Send, Sparkles, Waves } from '@lucide/vue'
 import DashboardBottomNav from '@/components/dashboard/DashboardBottomNav.vue'
 import DashboardMemoryCard from '@/components/dashboard/DashboardMemoryCard.vue'
 import DashboardSidebar from '@/components/dashboard/DashboardSidebar.vue'
@@ -13,6 +13,8 @@ const loading = ref(true)
 const error = ref('')
 const active = ref('beranda')
 const menuOpen = ref(false)
+const inboxCount = ref(0)
+const inboxUnlocked = ref(false)
 
 const currentMember = computed(() => members.find((member) => member.id === user.value?.memberId))
 const portrait = computed(() => currentMember.value?.portrait || '/images/kkn-group-hero.png')
@@ -45,6 +47,13 @@ async function loadSession() {
       return
     }
     user.value = payload.user
+
+    const inboxResponse = await fetch('/api/messages/inbox', { credentials: 'same-origin' })
+    if (inboxResponse.ok) {
+      const inboxPayload = await inboxResponse.json()
+      inboxCount.value = inboxPayload.messages?.length || 0
+      inboxUnlocked.value = Boolean(inboxPayload.accessUnlocked)
+    }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Ruang anggota belum dapat dibuka.'
   } finally {
@@ -62,7 +71,11 @@ function navigate(section: string) {
     window.location.assign('/dashboard/profil')
     return
   }
-  if (section === 'surat') {
+  if (section === 'tulis') {
+    window.location.assign('/dashboard/pesan/baru')
+    return
+  }
+  if (section === 'baca') {
     window.location.assign('/dashboard/surat')
     return
   }
@@ -124,17 +137,26 @@ onMounted(loadSession)
           <div class="dash-welcome__keepsakes">
             <article><strong>30</strong><span>hari<br />bersama</span></article>
             <article><strong>1.248</strong><span>foto<br />tersimpan</span></article>
-            <article><strong>3</strong><span>surat<br />untukmu</span></article>
+            <article><strong>{{ inboxCount }}</strong><span>surat<br />untukmu</span></article>
           </div>
         </section>
 
-        <section id="dash-surat" class="dash-section">
-          <header class="dash-section__head"><div><p>Hanya untukmu</p><h2>Surat yang menunggumu.</h2></div><button @click="writeMessage">Tulis pesan pribadi <ChevronRight :size="16" /></button></header>
+        <section id="dash-tulis" class="dash-section">
+          <header class="dash-section__head"><div><p>Bisa ditulis kapan saja</p><h2>Tulis pesan untuk temanmu.</h2></div><button @click="writeMessage">Pilih penerima <ChevronRight :size="16" /></button></header>
+          <article class="dash-write-teaser">
+            <span><Send :size="25" /></span>
+            <div><p>Ruang menulis selalu terbuka</p><h3>Tidak perlu menunggu inbox dibuka untuk menyampaikan sesuatu.</h3><small>Pilih satu dari dua belas temanmu, lalu simpan sebagai draf atau kirim ketika sudah siap.</small></div>
+            <button type="button" @click="writeMessage">Mulai menulis <ArrowRight :size="16" /></button>
+          </article>
+        </section>
+
+        <section id="dash-baca" class="dash-section">
+          <header class="dash-section__head"><div><p>{{ inboxUnlocked ? 'Akses membaca terbuka' : 'Dikunci oleh pengelola' }}</p><h2>Baca pesan yang dikirim untukmu.</h2></div><button @click="navigate('baca')">Lihat inbox <ChevronRight :size="16" /></button></header>
           <article class="dash-letter-teaser">
-            <div class="dash-letter-teaser__envelope"><span><MailOpen :size="25" /></span><i /><b /></div>
-            <p>Satu surat masih tersegel</p>
-            <h3>Ada sesuatu yang belum sempat dikatakan.</h3>
-            <button @click="navigate('surat')">Buka perlahan <ArrowRight :size="16" /></button>
+            <div class="dash-letter-teaser__envelope"><span><MailOpen v-if="inboxUnlocked" :size="25" /><LockKeyhole v-else :size="25" /></span><i /><b /></div>
+            <p>{{ inboxUnlocked ? 'Inbox sudah dapat dibuka' : `${inboxCount} surat masih tersegel` }}</p>
+            <h3>{{ inboxUnlocked ? 'Cerita-cerita itu sudah siap kamu baca.' : 'Ada sesuatu yang belum sempat dikatakan.' }}</h3>
+            <button @click="navigate('baca')">{{ inboxUnlocked ? 'Buka inbox' : 'Lihat surat tersegel' }} <ArrowRight :size="16" /></button>
           </article>
         </section>
 

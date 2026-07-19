@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowUpRight, Home, Images, LogOut, Mail, UserCircle, UsersRound, Waves } from '@lucide/vue'
+import { ArrowUpRight, Home, Images, LockKeyhole, LogOut, Send, UserCircle, UsersRound, Waves } from '@lucide/vue'
 import type { AuthUser } from '@/types/auth'
 
 defineProps<{ user: AuthUser; portrait: string; active?: string }>()
@@ -7,7 +7,8 @@ const emit = defineEmits<{ navigate: [section: string]; logout: [] }>()
 
 const items = [
   { id: 'beranda', label: 'Beranda', icon: Home },
-  { id: 'surat', label: 'Surat untukmu', icon: Mail, badge: 3 },
+  { id: 'tulis', label: 'Tulis pesan', icon: Send },
+  { id: 'baca', label: 'Baca pesan', icon: LockKeyhole },
   { id: 'album', label: 'Album kenangan', icon: Images },
   { id: 'lingkaran', label: 'Lingkaran kita', icon: UsersRound },
   { id: 'profil', label: 'Profil saya', icon: UserCircle },
@@ -28,7 +29,6 @@ const items = [
       <button v-for="item in items" :key="item.id" :class="{ active: active === item.id }" @click="emit('navigate', item.id)">
         <component :is="item.icon" :size="18" />
         <span>{{ item.label }}</span>
-        <small v-if="item.badge">{{ item.badge }}</small>
       </button>
     </nav>
 
@@ -38,4 +38,3 @@ const items = [
     </div>
   </aside>
 </template>
-

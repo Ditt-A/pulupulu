@@ -73,7 +73,11 @@ function writeMessage() {
 }
 
 function navigate(section: string) {
-  if (section === 'surat') return
+  if (section === 'baca') return
+  if (section === 'tulis') {
+    window.location.assign('/dashboard/pesan/baru')
+    return
+  }
   if (section === 'profil') {
     window.location.assign('/dashboard/profil')
     return
@@ -110,7 +114,7 @@ onMounted(loadInbox)
   </main>
 
   <div v-else class="dash-shell open-inbox-page" :class="{ 'dash-shell--menu-open': menuOpen }">
-    <DashboardSidebar :user="user" :portrait="portrait" active="surat" @navigate="navigate" @logout="logout" />
+    <DashboardSidebar :user="user" :portrait="portrait" active="baca" @navigate="navigate" @logout="logout" />
     <button class="dash-shell__scrim" aria-label="Tutup menu" @click="menuOpen = false" />
 
     <div class="dash-workspace">
@@ -145,7 +149,7 @@ onMounted(loadInbox)
       </main>
     </div>
 
-    <DashboardBottomNav active="surat" @navigate="navigate" />
+    <DashboardBottomNav active="baca" @navigate="navigate" />
 
   </div>
 </template>
