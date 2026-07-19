@@ -9,8 +9,10 @@ lerna-debug.log*
 
 node_modules
 .DS_Store
+dist
 dist-ssr
 coverage
+# Local environment files, including .env.local (never commit credentials)
 *.local
 
 # Editor directories and files
@@ -37,7 +39,7 @@ __screenshots__/
 # Vite
 *.timestamp-*-*.mjs
 
-# Local SQLite authentication database
+# Legacy SQLite files kept only as local backups after the PostgreSQL migration
 /database/*.sqlite
 /database/*.sqlite-shm
 /database/*.sqlite-wal
