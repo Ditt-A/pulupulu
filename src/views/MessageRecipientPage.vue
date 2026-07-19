@@ -127,12 +127,13 @@ function showToast(message: string) {
 }
 
 function navigate(section: string) {
-  if (section === 'profil') {
-    window.location.assign('/dashboard/profil')
+  if (section === 'tulis') return
+  if (section === 'baca') {
+    window.location.assign('/dashboard/surat')
     return
   }
-  if (section === 'surat') {
-    window.location.assign('/dashboard/surat')
+  if (section === 'profil') {
+    window.location.assign('/dashboard/profil')
     return
   }
   window.location.assign(section === 'beranda' ? '/dashboard' : `/dashboard#dash-${section}`)
@@ -168,14 +169,14 @@ onUnmounted(() => window.clearTimeout(toastTimer))
   </main>
 
   <div v-else class="dash-shell recipient-page" :class="{ 'dash-shell--menu-open': menuOpen }">
-    <DashboardSidebar :user="user" :portrait="portrait" active="surat" @navigate="navigate" @logout="logout" />
+    <DashboardSidebar :user="user" :portrait="portrait" active="tulis" @navigate="navigate" @logout="logout" />
     <button class="dash-shell__scrim" aria-label="Tutup menu" @click="menuOpen = false" />
 
     <div class="dash-workspace">
       <DashboardTopbar :user="user" :portrait="portrait" @menu="menuOpen = true" />
 
       <main class="recipient-content">
-        <button class="recipient-back" type="button" @click="navigate('surat')"><ArrowLeft :size="15" /> Kembali ke surat</button>
+        <button class="recipient-back" type="button" @click="navigate('beranda')"><ArrowLeft :size="15" /> Kembali ke beranda</button>
 
         <section class="recipient-hero">
           <div class="recipient-hero__copy">
@@ -246,7 +247,7 @@ onUnmounted(() => window.clearTimeout(toastTimer))
       </main>
     </div>
 
-    <DashboardBottomNav active="surat" @navigate="navigate" />
+    <DashboardBottomNav active="tulis" @navigate="navigate" />
 
     <Transition name="recipient-toast">
       <div v-if="toast" class="recipient-toast" role="status" aria-live="polite"><CheckCircle2 :size="18" /><span><strong>Penerima tersimpan</strong>{{ toast }}</span></div>

@@ -200,12 +200,13 @@ function chooseRecipient() {
 }
 
 function navigate(section: string) {
-  if (section === 'profil') {
-    window.location.assign('/dashboard/profil')
+  if (section === 'tulis') return
+  if (section === 'baca') {
+    window.location.assign('/dashboard/surat')
     return
   }
-  if (section === 'surat') {
-    window.location.assign('/dashboard/surat')
+  if (section === 'profil') {
+    window.location.assign('/dashboard/profil')
     return
   }
   window.location.assign(section === 'beranda' ? '/dashboard' : `/dashboard#dash-${section}`)
@@ -254,7 +255,7 @@ onBeforeUnmount(() => {
   </main>
 
   <div v-else-if="user" class="dash-shell composer-page" :class="{ 'dash-shell--menu-open': menuOpen }">
-    <DashboardSidebar :user="user" :portrait="portrait" active="surat" @navigate="navigate" @logout="logout" />
+    <DashboardSidebar :user="user" :portrait="portrait" active="tulis" @navigate="navigate" @logout="logout" />
     <button class="dash-shell__scrim" aria-label="Tutup menu" @click="menuOpen = false" />
 
     <div class="dash-workspace">
@@ -273,7 +274,7 @@ onBeforeUnmount(() => {
         <p>Pesan telah berlayar</p>
         <h1>Suratmu sudah dikirim<br /><em>kepada {{ recipient.name.split(' ')[0] }}.</em></h1>
         <span>Pesan tersimpan dengan aman dan hanya dapat dibuka oleh {{ recipient.name }}.</span>
-        <div><button type="button" @click="navigate('surat')">Kembali ke ruang surat</button><button type="button" @click="chooseRecipient">Tulis pesan lain <ArrowRight :size="15" /></button></div>
+        <div><button type="button" @click="navigate('beranda')">Kembali ke beranda</button><button type="button" @click="chooseRecipient">Tulis pesan lain <ArrowRight :size="15" /></button></div>
       </main>
 
       <main v-else class="composer-content">
@@ -318,7 +319,7 @@ onBeforeUnmount(() => {
       </main>
     </div>
 
-    <DashboardBottomNav active="surat" @navigate="navigate" />
+    <DashboardBottomNav active="tulis" @navigate="navigate" />
 
     <ConfirmationModal
       :open="confirmationOpen"

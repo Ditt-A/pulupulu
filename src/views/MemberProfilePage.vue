@@ -44,7 +44,11 @@ async function loadSession() {
 function navigate(section: string) {
   menuOpen.value = false
   if (section === 'profil') return
-  if (section === 'surat') {
+  if (section === 'tulis') {
+    window.location.assign('/dashboard/pesan/baru')
+    return
+  }
+  if (section === 'baca') {
     window.location.assign('/dashboard/surat')
     return
   }
