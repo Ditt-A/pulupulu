@@ -9,6 +9,7 @@ import AdminTopbar from '@/components/admin/AdminTopbar.vue'
 import AdminSidebar from '@/components/layout/AdminSidebar.vue'
 import { useAdminStore } from '@/stores/admin'
 import type { AdminActivityStatus, AdminPeriod } from '@/types/admin'
+import { formatApiDate } from '@/utils/date'
 
 const admin = useAdminStore()
 const state = admin.state
@@ -32,7 +33,7 @@ const readDonut = computed(() => {
 const periodLabel = computed(() => periodOptions.find((item) => item.value === state.period)?.label || 'Sepanjang waktu')
 
 function formatActivityDate(value: string) {
-  return new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value.replace(' ', 'T') + 'Z'))
+  return formatApiDate(value, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 async function navigate(section: string) {

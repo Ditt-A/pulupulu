@@ -7,6 +7,7 @@ import AdminSidebar from '@/components/layout/AdminSidebar.vue'
 import ConfirmationModal from '@/components/ui/ConfirmationModal.vue'
 import ToastNotification from '@/components/ui/ToastNotification.vue'
 import { useAdminStore } from '@/stores/admin'
+import { formatApiDate } from '@/utils/date'
 
 const admin = useAdminStore()
 const state = admin.state
@@ -21,10 +22,14 @@ let toastTimer = 0
 
 const access = computed(() => state.messageAccess)
 const firstName = computed(() => state.user?.name.split(' ').find((part) => part.length > 3) || 'Pengelola')
-const topbarTimestamp = computed(() => access.value?.updatedAt ? `${access.value.updatedAt.replace(' ', 'T')}Z` : undefined)
+const topbarTimestamp = computed(() => access.value?.updatedAt || undefined)
 const formattedUpdatedAt = computed(() => {
   if (!access.value?.updatedAt) return 'Belum pernah diubah'
-  return new Intl.DateTimeFormat('id-ID', { dateStyle: 'long', timeStyle: 'short' }).format(new Date(`${access.value.updatedAt.replace(' ', 'T')}Z`))
+  return formatApiDate(access.value.updatedAt, {
+    dateStyle: 'long',
+    timeStyle: 'short',
+    timeZone: 'Asia/Jakarta',
+  })
 })
 const dateFormatter = new Intl.DateTimeFormat('id-ID', { dateStyle: 'long', timeStyle: 'short', timeZone: 'Asia/Jakarta' })
 const plannedDate = computed(() => access.value?.plannedReleaseAt ? dateFormatter.format(new Date(access.value.plannedReleaseAt)) : 'Belum ditentukan')
