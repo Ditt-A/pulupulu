@@ -2,13 +2,14 @@
 import { KeyRound, LogIn, Mail, PauseCircle, PlayCircle, RotateCcw, Send, ShieldCheck } from '@lucide/vue'
 import { members as memberProfiles } from '@/data/members'
 import type { ManagedMember } from '@/types/admin'
+import { formatApiDate } from '@/utils/date'
 
 defineProps<{ members: ManagedMember[]; actionId: number | null }>()
 const emit = defineEmits<{ reset: [member: ManagedMember]; status: [member: ManagedMember] }>()
 function portraitFor(memberId: number) { return memberProfiles.find((member) => member.id === memberId)?.portrait || '/images/kkn-group-hero.png' }
 function lastLogin(value: string | null) {
   if (!value) return 'Belum pernah masuk'
-  return new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(`${value.replace(' ', 'T')}Z`))
+  return formatApiDate(value, { dateStyle: 'medium', timeStyle: 'short' })
 }
 </script>
 

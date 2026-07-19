@@ -2,12 +2,13 @@
 import { computed } from 'vue'
 import { Menu, RefreshCw, ShieldCheck } from '@lucide/vue'
 import type { AuthUser } from '@/types/auth'
+import { formatApiDate } from '@/utils/date'
 
 const props = defineProps<{ user: AuthUser; refreshing: boolean; generatedAt?: string }>()
 const emit = defineEmits<{ menu: []; refresh: [] }>()
 const initials = computed(() => props.user.name.split(' ').filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase())
 const updatedLabel = computed(() => props.generatedAt
-  ? `Diperbarui ${new Intl.DateTimeFormat('id-ID', { hour: '2-digit', minute: '2-digit' }).format(new Date(props.generatedAt))}`
+  ? `Diperbarui ${formatApiDate(props.generatedAt, { hour: '2-digit', minute: '2-digit' }, 'baru saja')}`
   : 'Menunggu pembaruan')
 </script>
 

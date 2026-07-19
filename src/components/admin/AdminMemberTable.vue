@@ -2,6 +2,7 @@
 import { Search, ShieldCheck, UserRound, Waves } from '@lucide/vue'
 import { members as memberProfiles } from '@/data/members'
 import type { AdminMemberMetric, AdminMemberStatus } from '@/types/admin'
+import { formatApiDate } from '@/utils/date'
 
 defineProps<{ members: AdminMemberMetric[]; total: number; query: string; status: AdminMemberStatus }>()
 const emit = defineEmits<{ 'update:query': [value: string]; 'update:status': [value: AdminMemberStatus] }>()
@@ -11,7 +12,7 @@ function portraitFor(memberId: number) {
 }
 function formatLastLogin(value: string | null) {
   if (!value) return 'Belum pernah masuk'
-  return new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value.replace(' ', 'T') + 'Z'))
+  return formatApiDate(value, { dateStyle: 'medium', timeStyle: 'short' })
 }
 </script>
 
