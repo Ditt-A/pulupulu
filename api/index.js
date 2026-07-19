@@ -48,7 +48,7 @@ function buildApiRequestUrl(request) {
     ? incomingUrl.pathname.slice('/api/'.length)
     : ''
   const rewrittenApiPath = incomingUrl.searchParams.get(internalPathParameter) || ''
-  const apiPath = decodeApiPath(directApiPath || rewrittenApiPath)
+  const apiPath = decodeApiPath(rewrittenApiPath || directApiPath)
 
   incomingUrl.searchParams.delete(internalPathParameter)
   return `${apiPath}${incomingUrl.search}`
